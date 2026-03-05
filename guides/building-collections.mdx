@@ -1,0 +1,266 @@
+---
+title: Building Collections
+description: Learn how to build Rasteret Collections from STAC APIs, GeoParquet, and custom datasets
+---
+
+Collections are the foundation of Rasteret. They combine metadata indexes with on-demand pixel access, giving you a unified interface for querying and reading cloud-optimized raster data.
+
+This guide shows you how to build Collections from different sources and persist them for reuse.
+
+## Quick Start: STAC API
+
+The simplest way to build a Collection is from a registered dataset descriptor:
+
+```python
+import rasteret
+
+# Build from a registered dataset (e.g. Earth Search Sentinel-2)
+collection = rasteret.build(
+    "earthsearch/sentinel-2-l2a",
+    name="sf-bay",
+    bbox=(-122.5, 37.7, -122.3, 37.9),
+    date_range=("2024-06-01", "2024-07-15"),
+)
+
+print(f"Built {collection.name} with {len(collection)} scenes")
+print(f"Available bands: {collection.bands}")
+```
+
+**What happened:**
+1. Rasteret queried the STAC API for matching scenes
+2. Parsed COG headers to extract tile metadata (dimensions, offsets, transforms)
+3. Cached everything as partitioned Parquet in `~/rasteret_workspace/`
+4. Returned a `Collection` ready for filtering and pixel reads
+
+On subsequent runs with the same parameters, Rasteret reuses the cached index (no STAC query or header parsing).
+
+## Building from STAC: Advanced
+
+For full control over STAC queries, use `build_from_stac()`:
+
+```python
+collection = rasteret.build_from_stac(
+    name="madrid-s2",
+    stac_api="https://earth-search.aws.element84.com/v1",
+    collection="sentinel-2-l2a",
+    bbox=(-3.75, 40.38, -3.65, 40.48),
+    date_range=("2024-01-01", "2024-06-30"),
+    query={"eo:cloud_cover": {"lt": 20}},  # Additional STAC filters
+    force=True,  # Rebuild even if cache exists
+    max_concurrent=100,  # COG header fetch concurrency
+)
+```
+
+**Key parameters:**
+- `name`: Logical name for the collection
+- `stac_api`: STAC API endpoint URL
+- `collection`: STAC collection ID (e.g. `"sentinel-2-l2a"`)
+- `bbox`: `(minx, miny, maxx, maxy)` in EPSG:4326
+- `date_range`: `(start, end)` ISO date strings
+- `query`: Additional STAC query parameters (passed to `/search`)
+- `force`: Rebuild even if a cached collection exists
+- `max_concurrent`: Concurrency for COG header fetching
+
+### Custom STAC Collections
+
+If you're working with a STAC API that isn't in the registry, provide band mappings explicitly:
+
+```python
+collection = rasteret.build_from_stac(
+    name="custom-landsat",
+    stac_api="https://stac.example.com/v1",
+    collection="landsat-custom",
+    bbox=(-120.0, 35.0, -119.5, 35.5),
+    date_range=("2024-01-01", "2024-12-31"),
+    band_map={
+        "B1": "coastal",
+        "B2": "blue",
+        "B3": "green",
+        "B4": "red",
+        "B5": "nir",
+        "B6": "swir1",
+        "B7": "swir2",
+    },
+)
+```
+
+For multi-band COGs (single file with multiple bands), add a `band_index_map`:
+
+```python
+# NAIP: 4-band COG (R, G, B, NIR in a single "image" asset)
+collection = rasteret.build_from_stac(
+    name="naip-iowa",
+    stac_api="https://earth-search.aws.element84.com/v1",
+    collection="naip",
+    bbox=(-93.8, 41.9, -93.6, 42.1),
+    date_range=("2022-01-01", "2022-12-31"),
+    band_map={"R": "image", "G": "image", "B": "image", "NIR": "image"},
+    band_index_map={"R": 0, "G": 1, "B": 2, "NIR": 3},
+)
+```
+
+## Building from GeoParquet
+
+If you have a GeoParquet file with COG URLs (STAC export, Source Cooperative index, etc.), use `build_from_table()`:
+
+```python
+import rasteret
+
+# Build from a remote GeoParquet index
+collection = rasteret.build_from_table(
+    "s3://bucket/path/to/items.parquet",
+    name="my-collection",
+    data_source="sentinel-2-l2a",  # For band mapping
+    enrich_cog=True,  # Parse COG headers
+    max_concurrent=200,
+)
+```
+
+**Requirements:**
+The Parquet table must have these columns (or mappable equivalents):
+- `id`: Scene identifier
+- `datetime`: Timestamp
+- `geometry`: Footprint (WKB)
+- `assets`: Struct mapping band codes to COG URLs
+
+### Column Mapping
+
+If your Parquet uses different column names, provide a `column_map`:
+
+```python
+collection = rasteret.build_from_table(
+    "s3://data.source.coop/example/index.parquet",
+    name="aef-example",
+    column_map={
+        "fid": "id",           # fid → id
+        "geom": "geometry",    # geom → geometry
+        "year": "datetime",    # year → datetime
+    },
+    href_column="path",         # COG URL column
+    band_index_map={f"A{i:02d}": i for i in range(64)},  # Multi-band COG
+    enrich_cog=True,
+)
+```
+
+See `/home/daytona/workspace/source/examples/aef_duckdb_query.py:1` for a complete example using DuckDB to query a GeoParquet index before building.
+
+### Filtering at Build Time
+
+Use Arrow expressions to filter rows before enrichment:
+
+```python
+import pyarrow.dataset as ds
+
+filter_expr = (
+    (ds.field("eo:cloud_cover") < 20) &
+    (ds.field("year") == 2024)
+)
+
+collection = rasteret.build_from_table(
+    "s3://bucket/items.parquet",
+    name="filtered",
+    filter_expr=filter_expr,
+    enrich_cog=True,
+)
+```
+
+## Persistent Collections
+
+Once built, Collections are cached in `~/rasteret_workspace/`. To save a portable copy:
+
+```python
+# Export as partitioned Parquet
+collection.export("./shared_collections/my_collection")
+
+# Reload later (no rebuild needed)
+reloaded = rasteret.load("./shared_collections/my_collection")
+```
+
+Exported Collections include:
+- All metadata (scene records, band metadata, COG tile offsets)
+- GeoParquet metadata (geometry encoding, CRS)
+- Rasteret metadata (name, data source, date range)
+
+You can share exported Collections with teammates via S3, GCS, or file shares. No STAC API access required for reads.
+
+## Listing Cached Collections
+
+```python
+from rasteret import Collection
+
+cached = Collection.list_collections()
+for item in cached:
+    print(f"{item['name']}: {item['size']} scenes, {item['data_source']}")
+```
+
+## Authentication for Private Data
+
+For datasets requiring credentials (Planetary Computer, NASA Earthdata, etc.), create a backend:
+
+```python
+import rasteret
+from obstore.auth.planetary_computer import PlanetaryComputerCredentialProvider
+
+# Create authenticated backend
+backend = rasteret.create_backend(
+    credential_provider=PlanetaryComputerCredentialProvider(
+        "https://planetarycomputer.microsoft.com/api/sas/v1/token"
+    ),
+)
+
+# Use backend for build (COG header parsing) and reads
+collection = rasteret.build(
+    "pc/sentinel-2-l2a",
+    name="pc-example",
+    bbox=(-122.5, 37.7, -122.3, 37.9),
+    date_range=("2024-06-01", "2024-07-15"),
+    backend=backend,
+)
+```
+
+See the [Cloud Authentication](/guides/cloud-authentication) guide for details.
+
+## Best Practices
+
+### Cache Management
+
+**Rebuild when:**
+- STAC collection metadata changes (new scenes available)
+- You need different bands than what's cached
+- Source data has been updated
+
+**Reuse when:**
+- Running analysis on the same AOI + time range
+- Sharing collections with teammates
+- Iterating on ML models (training script doesn't need to rebuild)
+
+### Workspace Organization
+
+```python
+from pathlib import Path
+
+# Separate workspace per project
+workspace = Path("/mnt/data/project_x/collections")
+
+collection = rasteret.build_from_stac(
+    name="sentinel",
+    stac_api="...",
+    collection="sentinel-2-l2a",
+    bbox=BBOX,
+    date_range=DATE_RANGE,
+    workspace_dir=workspace,
+)
+```
+
+### Large AOIs
+
+For continent-scale collections, consider:
+1. **Spatial partitioning**: Build multiple Collections for sub-regions
+2. **Temporal batching**: Build monthly or quarterly Collections
+3. **Cloud storage**: Use S3/GCS for the workspace (requires `force=False` to avoid re-enrichment)
+
+## Next Steps
+
+- [Filtering Collections](/guides/filtering-queries) - Subset by cloud cover, date, geometry
+- [Data Analysis](/guides/data-analysis) - Load pixels as xarray, NumPy, or GeoDataFrames
+- [ML Training](/guides/ml-training) - TorchGeo integration for deep learning

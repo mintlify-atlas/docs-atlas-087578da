@@ -1,0 +1,347 @@
+---
+title: Collections
+description: Core abstraction for working with indexed raster datasets
+---
+
+## Overview
+
+A **Collection** is Rasteret's primary interface for working with indexed raster data. It wraps an Arrow Dataset (the Parquet index) and provides:
+
+- Filtering by date, cloud cover, bbox, custom columns
+- Data export to NumPy, xarray, GeoDataFrame, TorchGeo
+- Persistence and sharing as Parquet artifacts
+
+## Creating Collections
+
+### From the Catalog
+
+Use `rasteret.build()` to create a Collection from a registered dataset:
+
+```python
+import rasteret
+
+collection = rasteret.build(
+    "earthsearch/sentinel-2-l2a",
+    name="bangalore_2024",
+    bbox=(77.5, 12.9, 77.7, 13.1),
+    date_range=("2024-01-01", "2024-06-30"),
+)
+```
+
+**What happens**:
+1. Looks up `earthsearch/sentinel-2-l2a` in the DatasetRegistry
+2. Queries Element84 STAC API with bbox and date range
+3. Parses COG headers for all matching scenes
+4. Writes Parquet index to `~/rasteret_workspace/bangalore_2024_202401-06_sentinel_stac/`
+5. Returns Collection wrapping the cached index
+
+**Subsequent runs**: Cache hit, loads in milliseconds from Parquet.
+
+See `src/rasteret/__init__.py:232` for the `build()` implementation.
+
+### From STAC Directly
+
+Use `rasteret.build_from_stac()` for datasets not in the catalog:
+
+```python
+collection = rasteret.build_from_stac(
+    name="custom_sentinel",
+    stac_api="https://earth-search.aws.element84.com/v1",
+    collection="sentinel-2-l2a",
+    band_map={"B04": "red", "B08": "nir"},
+    bbox=(77.5, 12.9, 77.7, 13.1),
+    date_range=("2024-01-01", "2024-06-30"),
+)
+```
+
+See `src/rasteret/__init__.py:76` for full parameters.
+
+### From Parquet Tables
+
+Use `rasteret.build_from_table()` to index existing GeoParquet files:
+
+```python
+# Example: AlphaEarth Foundation embeddings from Source Cooperative
+collection = rasteret.build_from_table(
+    "s3://us-west-2.opendata.source.coop/tge-labs/aef/v1/annual/aef_index.parquet",
+    name="aef_embeddings",
+    column_map={"fid": "id", "geom": "geometry", "year": "datetime"},
+    href_column="path",
+    band_index_map={f"A{i:02d}": i for i in range(64)},  # 64-band embeddings
+    enrich_cog=True,
+)
+```
+
+**Parameters**:
+- `column_map`: Rename columns to match Rasteret's schema contract
+- `href_column`: Column containing COG URLs
+- `band_index_map`: Map band codes to sample indices in multi-band COGs
+- `enrich_cog=True`: Parse COG headers and add metadata columns
+
+See `src/rasteret/__init__.py:780` for the full API.
+
+### From Existing Artifacts
+
+Load a previously saved Collection:
+
+```python
+collection = rasteret.load("~/rasteret_workspace/bangalore_2024_sentinel_stac")
+```
+
+## Collection Lifecycle
+
+### Inspection
+
+```python
+# Basic properties
+print(collection)  
+# Collection('bangalore_2024', source='sentinel-2-l2a', bands=13, records=42, crs=32643)
+
+len(collection)              # 42 scene records
+collection.bands             # ['B01', 'B02', ..., 'B12', 'SCL']
+collection.bounds            # (minx, miny, maxx, maxy) in CRS84
+collection.epsg              # [32643] - unique EPSG codes
+```
+
+See `src/rasteret/core/collection.py:704-741` for the properties implementation.
+
+### Filtering
+
+All filtering operations return **new Collection views** (lazy, no copies):
+
+```python
+# Cloud cover filter
+low_cloud = collection.subset(cloud_cover_lt=15)
+
+# Date range filter  
+spring = collection.subset(date_range=("2024-03-01", "2024-06-01"))
+
+# Spatial filter
+aoi = (77.55, 12.95, 77.65, 13.05)
+region = collection.subset(bbox=aoi)
+
+# Combine filters (AND semantics)
+filtered = collection.subset(
+    cloud_cover_lt=10,
+    date_range=("2024-04-01", "2024-06-01"),
+    bbox=aoi,
+)
+
+# Custom Arrow expressions
+import pyarrow.dataset as ds
+filtered = collection.where(
+    (ds.field("eo:cloud_cover") < 10) & (ds.field("satellite") == "sentinel-2a")
+)
+```
+
+See `src/rasteret/core/collection.py:293-456` for the subset implementation.
+
+### ML Splits
+
+Add a split column to the Parquet index, then filter:
+
+```python
+import pyarrow.compute as pc
+
+# Add random split column (80/20 train/val)
+table = collection.dataset.to_table()
+random_values = pc.random(len(table))
+split_col = pc.if_else(random_values < 0.8, "train", "val")
+table = table.append_column("split", [split_col])
+
+# Rebuild collection with new column
+collection_with_splits = rasteret.as_collection(table, name="bangalore_with_splits")
+
+# Filter by split
+train = collection_with_splits.select_split("train")
+val = collection_with_splits.select_split("val")
+```
+
+See `src/rasteret/core/collection.py:439-450` for `select_split()`.
+
+## Data Export
+
+### NumPy Arrays
+
+```python
+import numpy as np
+
+aoi = (77.55, 12.95, 77.65, 13.05)
+arr = collection.get_numpy(
+    geometries=aoi,
+    bands=["B04", "B08"],
+)
+# arr.shape: [N_scenes, 2_bands, H, W]
+# arr.dtype: uint16 (native COG dtype preserved)
+```
+
+See `src/rasteret/core/collection.py:1210-1261` for the implementation.
+
+### xarray Datasets
+
+```python
+ds = collection.get_xarray(
+    geometries=aoi,
+    bands=["B04", "B08"],
+)
+ndvi = (ds.B08 - ds.B04) / (ds.B08 + ds.B04)
+ndvi.plot()
+```
+
+See `src/rasteret/core/collection.py:1098-1153` for parameters.
+
+### TorchGeo Integration
+
+```python
+from torch.utils.data import DataLoader
+from torchgeo.samplers import RandomGeoSampler
+
+dataset = collection.to_torchgeo_dataset(
+    bands=["B04", "B03", "B02", "B08"],
+    chip_size=256,
+)
+
+sampler = RandomGeoSampler(dataset, size=256, length=1000)
+loader = DataLoader(dataset, sampler=sampler, batch_size=16)
+
+for batch in loader:
+    image = batch["image"]  # [16, 4, 256, 256] uint16 tensor
+    bbox = batch["bbox"]    # [16, 4] spatial coordinates
+    # ... train model
+```
+
+Rasteret replaces TorchGeo's rasterio backend but speaks the same interface:
+- `__getitem__(BoundingBox)` returns `{"image": Tensor, "bbox": Tensor}`
+- Works with all TorchGeo samplers (RandomGeoSampler, GridGeoSampler, etc.)
+- Compatible with IntersectionDataset, UnionDataset for multi-dataset training
+
+See `src/rasteret/core/collection.py:983-1078` for the full API.
+
+## Persistence and Sharing
+
+### Export as Parquet
+
+```python
+# Export to local directory
+collection.export("./my_collection/")
+
+# Export to cloud storage
+collection.export("s3://my-bucket/collections/bangalore/")
+
+# Custom partitioning
+collection.export(
+    "./partitioned/",
+    partition_by=("year", "month", "satellite"),
+)
+```
+
+**What gets written**:
+- Partitioned Parquet files (default: year/month)
+- GeoParquet 1.1 metadata for geometry column
+- Collection metadata in schema (name, data_source, date_range)
+
+See `src/rasteret/core/collection.py:550-634` for the implementation.
+
+### Load Shared Collection
+
+```python
+# Teammate loads your exported collection
+collection = rasteret.load("s3://my-bucket/collections/bangalore/")
+# Instant access, no rebuild required
+```
+
+### Register as Local Dataset
+
+```python
+# Make a local collection appear in the catalog
+rasteret.register_local(
+    dataset_id="local/bangalore_2024",
+    path="./my_collection/",
+    name="Bangalore 2024 Training Set",
+)
+
+# Now available via build()
+collection = rasteret.build("local/bangalore_2024", name="reload")
+```
+
+See `src/rasteret/__init__.py:513` for the registration API.
+
+## Schema Contract
+
+Collections expect these columns (added automatically by `build()`, `build_from_stac()`, etc.):
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | string | Unique scene identifier |
+| `datetime` | timestamp | Scene acquisition time |
+| `geometry` | binary (WKB) | Scene footprint in CRS84 |
+| `assets` | struct | Per-band asset metadata (href, band_index) |
+| `scene_bbox` | struct | Bounding box as struct (not scalar columns) |
+| `{band}_metadata` | struct | COG header metadata (tile_offsets, transform, etc.) |
+
+Optional:
+- `eo:cloud_cover` (float64): Cloud cover percentage
+- `proj:epsg` (int32): Native CRS EPSG code
+- `split` (string): ML split label (train/val/test)
+- Custom columns: Add anything you need
+
+<Tip>
+Use `collection.dataset.schema` to inspect the full schema.
+</Tip>
+
+## Advanced Patterns
+
+### Iterate Over Scenes
+
+```python
+async for raster in collection.iterate_rasters():
+    print(raster.id, raster.datetime)
+    bands = await raster.load_bands(["B04", "B08"])
+    # bands: dict of {band_code: numpy array}
+```
+
+See `src/rasteret/core/collection.py:636-685`.
+
+### Multi-CRS Collections
+
+Collections can contain scenes in different UTM zones. Rasteret handles reprojection:
+
+```python
+# Auto-reproject all scenes to EPSG:32643 before stacking
+ds = collection.get_xarray(
+    geometries=aoi,
+    bands=["B04"],
+    target_crs=32643,
+)
+```
+
+### Requester-Pays Data
+
+For datasets like Landsat on AWS (requester-pays):
+
+```python
+from rasteret import CloudConfig
+
+landsat = rasteret.build(
+    "earthsearch/landsat-c2-l2",
+    name="landsat_training",
+    bbox=(77.5, 12.9, 77.7, 13.1),
+    date_range=("2024-01-01", "2024-06-30"),
+    # CloudConfig auto-injected for earthsearch/landsat-c2-l2
+)
+
+# CloudConfig handles requester_pays=True automatically
+```
+
+See the [Custom Cloud Provider](/guides/cloud-authentication) guide.
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Dataset Catalog" href="/concepts/dataset-catalog" icon="book">
+    Explore built-in datasets and learn to add your own
+  </Card>
+  <Card title="Collection Management" href="/guides/building-collections" icon="wrench">
+    Deep dive into filtering, exporting, and customizing collections
+  </Card>
+</CardGroup>

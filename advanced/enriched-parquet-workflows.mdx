@@ -1,0 +1,374 @@
+---
+title: "Enriched Parquet Workflows"
+description: "Advanced COG metadata enrichment and custom Parquet workflows"
+---
+
+## Overview
+
+Rasteret's "index-first" architecture stores COG tile metadata in Parquet for fast reads. This guide covers:
+
+- How COG enrichment works under the hood
+- Adding custom metadata columns
+- Working with enriched Parquet outside Rasteret
+- Creating custom split strategies
+- Optimizing Parquet layouts for large collections
+
+## COG Enrichment Pipeline
+
+### What Gets Enriched
+
+When you call `build()` or `build_from_table(..., enrich_cog=True)`, Rasteret:
+
+1. Extracts COG URLs from the `assets` column (or builds them from `href_column`)
+2. Fetches the first ~32KB of each COG to parse the TIFF header
+3. Extracts tile layout, compression, and geospatial metadata
+4. Adds `{band}_metadata` struct columns to the Parquet table
+
+From `src/rasteret/ingest/enrich.py:226-262`, the enrichment pipeline is:
+
+```python
+async def enrich_table_with_cog_metadata(
+    table: pa.Table,
+    url_index: dict[str, dict[str, dict[str, Any]]],
+    band_codes: list[str],
+    *,
+    max_concurrent: int = 300,
+    batch_size: int = 100,
+    backend: StorageBackend | None = None,
+) -> pa.Table:
+    """Parse COG headers and add {band}_metadata columns."""
+    # Flatten URL index and dedupe
+    # Batch parse headers
+    # Slice tile tables for multi-sample GeoTIFFs
+    # Append struct columns
+```
+
+### Metadata Schema
+
+Each `{band}_metadata` column is a struct with:
+
+```python
+COG_BAND_METADATA_STRUCT = pa.struct([
+    ("image_width", pa.int32()),
+    ("image_height", pa.int32()),
+    ("tile_width", pa.int32()),
+    ("tile_height", pa.int32()),
+    ("dtype", pa.string()),
+    ("transform", pa.list_(pa.float64())),  # 6-element affine
+    ("predictor", pa.int32()),
+    ("compression", pa.string()),
+    ("tile_offsets", pa.list_(pa.int64())),
+    ("tile_byte_counts", pa.list_(pa.int32())),
+    ("pixel_scale", pa.list_(pa.float64())),
+    ("tiepoint", pa.list_(pa.float64())),
+    ("nodata", pa.float64()),
+    ("samples_per_pixel", pa.int32()),
+    ("planar_configuration", pa.int32()),
+    ("photometric", pa.int32()),
+    ("extra_samples", pa.list_(pa.int32())),
+])
+```
+
+This enables zero-download reads: Rasteret can compute which tiles to fetch for a query geometry without opening the COG.
+
+## Adding Custom Metadata Columns
+
+### Scenario: Major TOM-Style Grid Cells
+
+From `examples/major_tom_on_the_fly_collection.py:133-202`, you can add custom columns after building:
+
+```python
+import pyarrow as pa
+import numpy as np
+from majortom.grid import Grid
+
+def add_major_tom_columns(collection: rasteret.Collection, grid_km: int = 10):
+    """Add Major TOM product_id, grid_cell, and split columns."""
+    table = collection.dataset.to_table()
+    
+    # Extract bounding box centers
+    minx = table.column("bbox_minx").to_numpy(zero_copy_only=False)
+    maxx = table.column("bbox_maxx").to_numpy(zero_copy_only=False)
+    miny = table.column("bbox_miny").to_numpy(zero_copy_only=False)
+    maxy = table.column("bbox_maxy").to_numpy(zero_copy_only=False)
+    
+    lats = (miny + maxy) / 2.0
+    lons = (minx + maxx) / 2.0
+    
+    # Compute grid cells
+    grid = Grid(grid_km, latitude_range=(-90, 90), longitude_range=(-180, 180))
+    rows, cols = grid.latlon2rowcol(lats, lons)
+    cells = [f"{r}_{c}" for r, c in zip(rows, cols)]
+    
+    # Deterministic splits from grid cell hash
+    import zlib
+    splits = [
+        "train" if zlib.crc32(cell.encode()) % 100 < 80 else
+        "val" if zlib.crc32(cell.encode()) % 100 < 90 else
+        "test"
+        for cell in cells
+    ]
+    
+    # Append columns
+    table = table.append_column("major_tom_grid_cell", pa.array(cells))
+    table = table.append_column("split", pa.array(splits))
+    
+    return rasteret.as_collection(table, name=collection.name)
+
+# Usage
+enriched = add_major_tom_columns(collection)
+enriched.export("collection_with_splits")
+```
+
+### Scenario: Compute Derived Metadata
+
+Add scene-level summary stats or quality scores:
+
+```python
+import pyarrow.compute as pc
+
+def add_quality_scores(collection: rasteret.Collection):
+    """Add a quality score based on cloud cover and viewing angle."""
+    table = collection.dataset.to_table()
+    
+    cloud_cover = table.column("eo:cloud_cover").to_numpy(zero_copy_only=False)
+    view_angle = table.column("view:off_nadir").to_numpy(zero_copy_only=False)
+    
+    # Lower cloud + lower angle = higher quality
+    quality = 100 - (cloud_cover * 0.7 + np.abs(view_angle) * 0.3)
+    quality = np.clip(quality, 0, 100)
+    
+    table = table.append_column("quality_score", pa.array(quality))
+    
+    return rasteret.as_collection(table, name=collection.name)
+
+scored = add_quality_scores(collection)
+scored.subset(quality_score_gt=75)  # Only high-quality scenes
+```
+
+## Working with Enriched Parquet Externally
+
+Enriched Parquet files are standard GeoParquet with extra struct columns. Use them with any tool:
+
+### DuckDB Queries
+
+From `examples/aef_duckdb_query.py`, query enriched Parquet with SQL:
+
+```python
+import duckdb
+
+con = duckdb.connect()
+
+# Register the collection
+con.execute("""
+    CREATE VIEW collection AS
+    SELECT * FROM parquet_scan('collection_records/*.parquet')
+""")
+
+# Query tile counts per scene
+result = con.execute("""
+    SELECT
+        id,
+        datetime,
+        length(B04_metadata.tile_offsets) as num_tiles,
+        B04_metadata.compression as compression
+    FROM collection
+    WHERE eo:cloud_cover < 10
+    ORDER BY num_tiles DESC
+    LIMIT 10
+""").fetchdf()
+
+print(result)
+```
+
+### Pandas/GeoPandas
+
+```python
+import geopandas as gpd
+import pyarrow.parquet as pq
+
+# Read enriched Parquet
+table = pq.read_table("collection_records")
+gdf = gpd.GeoDataFrame(table.to_pandas())
+
+# Geometry column is WKB-encoded
+import shapely
+gdf["geometry"] = gdf["geometry"].apply(shapely.from_wkb)
+gdf = gdf.set_geometry("geometry")
+
+# Spatial filtering
+aoi = gpd.read_file("aoi.geojson")
+filtered = gdf[gdf.intersects(aoi.unary_union)]
+
+print(f"Scenes intersecting AOI: {len(filtered)}")
+```
+
+### Apache Spark
+
+```python
+from pyspark.sql import SparkSession
+
+spark = SparkSession.builder.appName("rasteret").getOrCreate()
+
+df = spark.read.parquet("collection_records/")
+
+# Query metadata
+df.createOrReplaceTempView("scenes")
+result = spark.sql("""
+    SELECT
+        collection,
+        COUNT(*) as count,
+        AVG(`eo:cloud_cover`) as avg_cloud_cover
+    FROM scenes
+    GROUP BY collection
+""")
+
+result.show()
+```
+
+## Custom Split Strategies
+
+### Spatial Splits
+
+Ensure training and validation sets cover different geographic regions:
+
+```python
+import geopandas as gpd
+from shapely.geometry import box
+
+def spatial_split(collection: rasteret.Collection, train_region, val_region):
+    """Assign splits based on spatial regions."""
+    table = collection.dataset.to_table()
+    
+    # Convert WKB geometries to shapely
+    geoms = [shapely.from_wkb(g) for g in table.column("geometry").to_pylist()]
+    
+    train_poly = shapely.from_geojson(open(train_region).read())
+    val_poly = shapely.from_geojson(open(val_region).read())
+    
+    splits = [
+        "train" if geom.intersects(train_poly) else
+        "val" if geom.intersects(val_poly) else
+        "test"
+        for geom in geoms
+    ]
+    
+    table = table.append_column("split", pa.array(splits))
+    return rasteret.as_collection(table, name=collection.name)
+
+split_coll = spatial_split(
+    collection,
+    train_region="regions/train.geojson",
+    val_region="regions/val.geojson",
+)
+```
+
+### Temporal Splits
+
+Old data for training, recent data for validation:
+
+```python
+from datetime import datetime
+
+def temporal_split(collection: rasteret.Collection, cutoff_date: str):
+    """Train on data before cutoff, validate after."""
+    table = collection.dataset.to_table()
+    cutoff = datetime.fromisoformat(cutoff_date)
+    
+    datetimes = table.column("datetime").to_pylist()
+    splits = ["train" if dt < cutoff else "val" for dt in datetimes]
+    
+    table = table.append_column("split", pa.array(splits))
+    return rasteret.as_collection(table, name=collection.name)
+
+split_coll = temporal_split(collection, "2024-05-01")
+```
+
+## Optimizing Parquet Layouts
+
+### Partitioning
+
+Rasteret auto-partitions by `year` and `month` when available:
+
+```python
+import pyarrow.dataset as ds
+
+collection.export("partitioned_collection")
+
+# Layout on disk:
+# partitioned_collection/
+#   year=2024/
+#     month=1/data.parquet
+#     month=2/data.parquet
+```
+
+For custom partitioning:
+
+```python
+table = collection.dataset.to_table()
+
+# Add custom partition columns
+table = table.append_column(
+    "grid_cell", 
+    pa.array([compute_grid_cell(g) for g in table.column("geometry").to_pylist()])
+)
+
+ds.write_dataset(
+    table,
+    "custom_partitioned",
+    format="parquet",
+    partitioning=["year", "month", "grid_cell"],
+    existing_data_behavior="overwrite_or_ignore",
+)
+```
+
+### Compression
+
+Default: `snappy` for fast decode. For cold storage, use `zstd`:
+
+```python
+import pyarrow.parquet as pq
+
+table = collection.dataset.to_table()
+
+pq.write_table(
+    table,
+    "compressed_collection.parquet",
+    compression="zstd",
+    compression_level=9,
+)
+```
+
+### Row Group Size
+
+Larger row groups = better compression, slower random access:
+
+```python
+pq.write_table(
+    table,
+    "large_row_groups.parquet",
+    row_group_size=100_000,  # Default is 1M rows
+)
+```
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Cache Enrichment Results">
+    COG header parsing is network-intensive. Always persist enriched collections with `collection.export()` and reuse them.
+  </Accordion>
+
+  <Accordion title="Use Partitioning for Large Collections">
+    Partitioning by `year/month` or spatial grid cells enables predicate pushdown. DuckDB/Spark can skip irrelevant files entirely.
+  </Accordion>
+
+  <Accordion title="Validate Metadata After Custom Operations">
+    When adding columns or modifying tables, ensure `*_metadata` columns remain intact. Use `rasteret.as_collection(..., require_band_metadata=True)` to validate.
+  </Accordion>
+</AccordionGroup>
+
+## Related Resources
+
+- [Schema Contract](/concepts/index-first-retrieval#schema-contract) - Required Parquet schema
+- [build_from_table API](/api/build-from-table) - External Parquet ingestion
+- [as_collection API](/api/as-collection) - Wrapping custom tables

@@ -1,97 +1,269 @@
 ---
-title: "Introduction"
-description: "Welcome to the new home for your documentation"
+title: "Rasteret Documentation"
+description: "Index-first, fast GeoTIFF access layer for ML and analysis"
+mode: "custom"
 ---
 
-## Setting up
+<div className="relative overflow-hidden py-16 sm:py-20 bg-gradient-to-br dark:from-[#0a0e1a] dark:via-[#0f1420] dark:to-[#1a1d27] from-gray-50 via-white to-gray-100">
+  <div className="absolute inset-0 bg-grid-slate-900/[0.04] dark:bg-grid-slate-400/[0.05] bg-[size:32px_32px]" />
+  <div className="relative max-w-6xl mx-auto px-6 sm:px-8">
+    <div className="text-center">
+      <h1 className="text-4xl sm:text-5xl md:text-6xl font-bold text-gray-900 dark:text-white mb-6">
+        Beat Cold Starts with <span className="text-[#009DD1]">Rasteret</span>
+      </h1>
+      <p className="text-lg sm:text-xl text-gray-600 dark:text-gray-400 max-w-3xl mx-auto mb-8">
+        Index-first access to cloud-native GeoTIFF collections. Parse headers once, cache in Parquet, read pixels 20x faster for ML and geospatial analysis.
+      </p>
+      <div className="flex flex-wrap items-center justify-center gap-4">
+        <a
+          href="/quickstart"
+          className="inline-flex items-center px-6 py-3 rounded-lg bg-[#009DD1] hover:bg-[#0087b8] text-white font-semibold transition-colors no-underline"
+        >
+          Get Started
+        </a>
+        <a
+          href="/api/build"
+          className="inline-flex items-center px-6 py-3 rounded-lg border border-gray-300 dark:border-gray-700 bg-white/50 dark:bg-white/5 hover:bg-gray-50 dark:hover:bg-white/10 text-gray-900 dark:text-white font-semibold transition-colors no-underline"
+        >
+          API Reference
+        </a>
+      </div>
+    </div>
+  </div>
+</div>
 
-Get your documentation site up and running in minutes.
+<div className="mt-16 mb-16 max-w-5xl mx-auto px-6">
 
-<Card
-  title="Start here"
-  icon="rocket"
-  href="/quickstart"
-  horizontal
->
-  Follow our three step quickstart guide.
-</Card>
+## Why Rasteret?
 
-## Make it yours
+<CardGroup cols={3}>
+  <Card title="20x Faster" icon="bolt">
+    No cold-start penalty. Header metadata lives in Parquet, not behind HTTP. Same speed every time.
+  </Card>
+  <Card title="Zero Downloads" icon="cloud">
+    Work with terabytes of cloud imagery while storing only megabytes of metadata locally.
+  </Card>
+  <Card title="No STAC at Training Time" icon="shield-check">
+    Query STAC once at setup. Zero API calls during training loops, no rate-limiting risk.
+  </Card>
+</CardGroup>
 
-Design a docs site that looks great and empowers your users.
+</div>
 
-<Columns cols={2}>
+<div className="mt-16 mb-16 max-w-5xl mx-auto px-6">
+
+## Quick Start
+
+<Steps>
+  <Step title="Install Rasteret">
+    Install via pip or uv. Requires Python 3.12+.
+    
+    ```bash
+    uv pip install rasteret
+    ```
+  </Step>
+  
+  <Step title="Build a Collection">
+    Pick a dataset from the built-in catalog and create a collection with your bbox and date range.
+    
+    ```python
+    import rasteret
+
+    collection = rasteret.build(
+        "earthsearch/sentinel-2-l2a",
+        name="s2_training",
+        bbox=(77.5, 12.9, 77.7, 13.1),
+        date_range=("2024-01-01", "2024-06-30"),
+    )
+    ```
+    
+    Headers are parsed once and cached as Parquet. Subsequent runs load in milliseconds.
+  </Step>
+  
+  <Step title="Use Your Data">
+    Get data as NumPy arrays, xarray Datasets, or TorchGeo-compatible datasets for ML training.
+    
+    ```python
+    # For ML training
+    dataset = collection.to_torchgeo_dataset(
+        bands=["B04", "B03", "B02", "B08"],
+        chip_size=256,
+    )
+    
+    # For analysis
+    ds = collection.get_xarray(
+        geometries=(77.55, 13.01, 77.58, 13.08),
+        bands=["B04", "B08"],
+    )
+    ndvi = (ds.B08 - ds.B04) / (ds.B08 + ds.B04)
+    ```
+  </Step>
+</Steps>
+
+</div>
+
+<div className="mt-16 mb-16 max-w-5xl mx-auto px-6">
+
+## Explore by Topic
+
+<CardGroup cols={2}>
   <Card
-    title="Edit locally"
-    icon="pen-to-square"
-    href="/development"
+    title="Core Concepts"
+    icon="lightbulb"
+    href="/concepts/index-first-retrieval"
   >
-    Edit your docs locally and preview them in real time.
+    Understand index-first retrieval, collections, and the dataset catalog
   </Card>
   <Card
-    title="Customize your site"
-    icon="palette"
-    href="/essentials/settings"
+    title="Building Collections"
+    icon="database"
+    href="/guides/building-collections"
   >
-    Customize the design and colors of your site to match your brand.
-  </Card>
-    <Card
-    title="Set up navigation"
-    icon="map"
-    href="/essentials/navigation"
-  >
-    Organize your docs to help users find what they need and succeed with your product.
+    Learn how to build collections from STAC APIs, GeoParquet, or custom sources
   </Card>
   <Card
-    title="API documentation"
-    icon="terminal"
-    href="/api-reference/introduction"
+    title="ML Training"
+    icon="brain"
+    href="/guides/ml-training"
   >
-    Auto-generate API documentation from OpenAPI specifications.
+    Integrate with TorchGeo for satellite imagery ML pipelines
   </Card>
-</Columns>
+  <Card
+    title="Data Analysis"
+    icon="chart-line"
+    href="/guides/data-analysis"
+  >
+    Query and analyze geospatial data with xarray and NumPy
+  </Card>
+  <Card
+    title="Cloud Authentication"
+    icon="key"
+    href="/guides/cloud-authentication"
+  >
+    Configure backends for Planetary Computer, AWS requester-pays, and Earthdata
+  </Card>
+  <Card
+    title="Dataset Catalog"
+    icon="book-open"
+    href="/concepts/dataset-catalog"
+  >
+    Browse 12+ built-in datasets including Sentinel-2, Landsat, NAIP, and more
+  </Card>
+</CardGroup>
 
-## Create beautiful pages
+</div>
 
-Everything you need to create world-class documentation.
+<div className="mt-16 mb-16 max-w-5xl mx-auto px-6">
 
-<Columns cols={2}>
+## Built-in Datasets
+
+Rasteret ships with a catalog of 12+ datasets. Each entry includes license metadata and a `commercial_use` flag.
+
+```bash
+rasteret datasets list
+```
+
+<Accordion title="Available Datasets">
+- **Sentinel-2 Level-2A** (Element84, Planetary Computer)
+- **Landsat Collection 2 Level-2** (Element84)
+- **NAIP** (Element84)
+- **Copernicus DEM** (30m, 90m)
+- **ESRI 10m Land Use/Land Cover** (Planetary Computer)
+- **ALOS World 3D 30m DEM** (Planetary Computer)
+- **NASADEM** (Planetary Computer)
+- **ESA WorldCover** (Planetary Computer)
+- **USDA Cropland Data Layer** (Planetary Computer)
+- **AlphaEarth Foundation Embeddings** (Annual, global)
+
+See the [Dataset Catalog](/concepts/dataset-catalog) for full details.
+</Accordion>
+
+The catalog is community-driven. Each entry is ~20 lines of Python. One PR adds a dataset for all users.
+
+</div>
+
+<div className="mt-16 mb-16 max-w-5xl mx-auto px-6">
+
+## Integrations
+
+<CardGroup cols={3}>
   <Card
-    title="Write with MDX"
-    icon="pen-fancy"
-    href="/essentials/markdown"
+    title="TorchGeo"
+    icon="fire"
+    href="/integrations/torchgeo"
   >
-    Use MDX to style your docs pages.
+    Drop-in GeoDataset for ML training with TorchGeo samplers and DataLoaders
   </Card>
   <Card
-    title="Code samples"
-    icon="code"
-    href="/essentials/code"
+    title="xarray"
+    icon="grid"
+    href="/integrations/xarray"
   >
-    Add sample code to demonstrate how to use your product.
+    Query and analyze multi-dimensional geospatial data with xarray
   </Card>
   <Card
-    title="Images"
-    icon="image"
-    href="/essentials/images"
+    title="STAC"
+    icon="satellite"
+    href="/integrations/stac"
   >
-    Display images and other media.
+    Build collections from any STAC API endpoint
+  </Card>
+</CardGroup>
+
+</div>
+
+<div className="mt-16 mb-16 max-w-5xl mx-auto px-6">
+
+## Community & Support
+
+<CardGroup cols={2}>
+  <Card
+    title="GitHub Discussions"
+    icon="github"
+    href="https://github.com/terrafloww/rasteret/discussions"
+  >
+    Ask questions, share workflows, and discuss features
   </Card>
   <Card
-    title="Reusable snippets"
-    icon="recycle"
-    href="/essentials/reusable-snippets"
+    title="Discord Community"
+    icon="discord"
+    href="https://discord.gg/V5vvuEBc"
   >
-    Write once and reuse across your docs.
+    Join the community for real-time chat and support
   </Card>
-</Columns>
+  <Card
+    title="Contributing"
+    icon="code-pull-request"
+    href="/advanced/contributing-datasets"
+  >
+    Add datasets, improve docs, or contribute to the codebase
+  </Card>
+  <Card
+    title="Issues & Bug Reports"
+    icon="bug"
+    href="https://github.com/terrafloww/rasteret/issues"
+  >
+    Report bugs and request features on GitHub
+  </Card>
+</CardGroup>
 
-## Need inspiration?
+</div>
 
-<Card
-  title="See complete examples"
-  icon="stars"
-  href="https://mintlify.com/customers"
->
-  Browse our showcase of exceptional documentation sites.
-</Card>
+<div className="mt-20 mb-16 max-w-5xl mx-auto px-6">
+  <div className="p-8 rounded-2xl border border-gray-200 dark:border-gray-800 bg-gradient-to-br from-gray-50 to-white dark:from-[#1a1d27] dark:to-[#242838]">
+    <div className="text-center">
+      <h2 className="text-2xl sm:text-3xl font-bold text-gray-900 dark:text-white mb-4">
+        Ready to accelerate your geospatial workflows?
+      </h2>
+      <p className="text-base sm:text-lg text-gray-600 dark:text-gray-400 mb-6 max-w-2xl mx-auto">
+        Start building with Rasteret today and say goodbye to cold starts.
+      </p>
+      <a
+        href="/quickstart"
+        className="inline-flex items-center px-6 py-3 rounded-lg bg-[#009DD1] hover:bg-[#0087b8] text-white font-semibold transition-colors no-underline"
+      >
+        Get Started →
+      </a>
+    </div>
+  </div>
+</div>

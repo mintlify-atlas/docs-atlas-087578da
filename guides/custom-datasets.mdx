@@ -1,0 +1,384 @@
+---
+title: Custom Datasets
+description: Register custom datasets in Rasteret's catalog for reusable access
+---
+
+Rasteret's dataset registry lets you define reusable dataset descriptors for your own STAC APIs, GeoParquet indexes, or local collections. Once registered, you can build Collections using the simple `rasteret.build(dataset_id, ...)` API.
+
+## Quick Start: Register a STAC Dataset
+
+```python
+import rasteret
+from rasteret import DatasetDescriptor
+
+# Define your dataset
+descriptor = DatasetDescriptor(
+    id="acme/field-survey-2024",
+    name="ACME Field Survey 2024",
+    description="High-res drone imagery, 10cm, agricultural fields",
+    stac_api="https://stac.acme.com/v1",
+    stac_collection="field-survey-2024",
+    band_map={
+        "R": "red",
+        "G": "green",
+        "B": "blue",
+        "NIR": "nir",
+    },
+    spatial_coverage="regional",
+    temporal_range=("2024-01-01", "2024-12-31"),
+    license="proprietary",
+)
+
+# Register it
+rasteret.register(descriptor)
+
+# Use it
+collection = rasteret.build(
+    "acme/field-survey-2024",
+    name="field-001",
+    bbox=(11.3, 48.1, 11.5, 48.3),
+    date_range=("2024-06-01", "2024-08-31"),
+)
+```
+
+## DatasetDescriptor Fields
+
+A `DatasetDescriptor` captures dataset identity, access methods, and band mappings:
+
+### Identity
+
+```python
+DatasetDescriptor(
+    id="my-org/my-dataset",            # Namespaced ID
+    name="My Dataset",                   # Human-readable name
+    description="Brief description",     # One-liner
+)
+```
+
+### Access: STAC API
+
+```python
+DatasetDescriptor(
+    id="my-org/sentinel-3",
+    stac_api="https://stac.example.com/v1",
+    stac_collection="sentinel-3-olci",
+    band_map={
+        "B01": "Oa01",
+        "B02": "Oa02",
+        # ... more bands
+    },
+)
+```
+
+### Access: GeoParquet
+
+```python
+DatasetDescriptor(
+    id="my-org/custom-index",
+    geoparquet_uri="s3://my-bucket/index.parquet",
+    column_map={
+        "fid": "id",
+        "geom": "geometry",
+        "timestamp": "datetime",
+    },
+    href_column="cog_url",
+    band_index_map={"R": 0, "G": 1, "B": 2},  # Multi-band COG
+)
+```
+
+### Coverage & Licensing
+
+```python
+DatasetDescriptor(
+    id="my-org/dataset",
+    spatial_coverage="global",  # "global", "regional", "local", etc.
+    temporal_range=("2020-01-01", "2024-12-31"),
+    license="CC-BY-4.0",         # SPDX identifier or "proprietary"
+    license_url="https://creativecommons.org/licenses/by/4.0/",
+    commercial_use=True,         # False for licenses like CC-BY-NC
+)
+```
+
+### Authentication
+
+```python
+DatasetDescriptor(
+    id="my-org/private-data",
+    requires_auth=True,
+    s3_credentials_url="https://example.com/api/credentials",
+    cloud_config={
+        "provider": "aws",
+        "requester_pays": True,
+        "region": "us-west-2",
+        "url_patterns": {
+            "https://cdn.example.com/": "s3://my-bucket/",
+        },
+    },
+)
+```
+
+## Registering Local Collections
+
+If you've built a Collection and want to make it available via the registry:
+
+```python
+from pathlib import Path
+
+# Build a Collection
+collection = rasteret.build_from_stac(
+    name="my-local-collection",
+    stac_api="...",
+    collection="sentinel-2-l2a",
+    bbox=(11.3, 48.1, 11.5, 48.3),
+    date_range=("2024-01-01", "2024-06-30"),
+)
+
+# Export it
+export_path = Path("./collections/my_local_collection")
+collection.export(export_path)
+
+# Register it
+descriptor = rasteret.register_local(
+    dataset_id="local/my-collection",
+    path=export_path,
+    description="My analysis-ready collection",
+)
+
+# Now you can load it by ID
+reloaded = rasteret.build("local/my-collection", name="reloaded")
+```
+
+**What it does:**
+- Creates a `DatasetDescriptor` pointing to the local Parquet path
+- Registers it in the global registry (in-memory)
+- Persists it to `~/.rasteret/datasets.local.json` so it's available in future sessions
+
+## Managing the Registry
+
+### List All Datasets
+
+```python
+from rasteret import DatasetRegistry
+
+for desc in DatasetRegistry.list():
+    print(f"{desc.id}: {desc.name}")
+```
+
+### Search Datasets
+
+```python
+# Search by keyword (case-insensitive)
+results = DatasetRegistry.search("sentinel")
+for desc in results:
+    print(f"{desc.id}: {desc.name}")
+```
+
+### Get a Descriptor
+
+```python
+desc = DatasetRegistry.get("earthsearch/sentinel-2-l2a")
+if desc:
+    print(f"Name: {desc.name}")
+    print(f"STAC API: {desc.stac_api}")
+    print(f"Bands: {list(desc.band_map.keys())}")
+```
+
+### Unregister a Dataset
+
+```python
+# Unregister from in-memory registry
+DatasetRegistry.unregister("my-org/my-dataset")
+
+# Unregister from local persistent registry
+from rasteret.catalog import unregister_local_descriptor
+unregister_local_descriptor("local/my-collection")
+```
+
+## Advanced: Multi-Band COGs
+
+For datasets where multiple bands are stored in a single COG file:
+
+```python
+DatasetDescriptor(
+    id="my-org/naip-custom",
+    stac_api="https://stac.example.com/v1",
+    stac_collection="naip-custom",
+    band_map={
+        "R": "image",   # All bands map to the same asset
+        "G": "image",
+        "B": "image",
+        "NIR": "image",
+    },
+    band_index_map={  # Sample index within the multi-band COG
+        "R": 0,
+        "G": 1,
+        "B": 2,
+        "NIR": 3,
+    },
+    separate_files=False,  # Indicates multi-band COG
+)
+```
+
+## Example: Private STAC API
+
+```python
+import rasteret
+from rasteret import DatasetDescriptor
+
+# Define descriptor
+descriptor = DatasetDescriptor(
+    id="mycompany/internal-imagery",
+    name="Internal High-Res Imagery",
+    description="Proprietary 1m imagery, internal use only",
+    stac_api="https://stac.internal.mycompany.com/v1",
+    stac_collection="internal-2024",
+    band_map={
+        "R": "red",
+        "G": "green",
+        "B": "blue",
+    },
+    spatial_coverage="regional",
+    temporal_range=("2024-01-01", "present"),
+    requires_auth=True,
+    license="proprietary",
+    commercial_use=False,
+)
+
+# Register it
+rasteret.register(descriptor)
+
+# Use with credentials
+from obstore.store import S3Store
+backend = rasteret.create_backend(
+    default_s3_config={"region": "us-east-1"},
+)
+
+collection = rasteret.build(
+    "mycompany/internal-imagery",
+    name="project-x",
+    bbox=(-77.1, 38.8, -76.9, 39.0),
+    date_range=("2024-06-01", "2024-08-31"),
+    backend=backend,
+)
+```
+
+## Example: GeoParquet Index from Source Cooperative
+
+```python
+import rasteret
+from rasteret import DatasetDescriptor
+
+# AEF embeddings (already registered, shown here for reference)
+descriptor = DatasetDescriptor(
+    id="my-org/aef-custom",
+    name="AEF Embeddings (Custom)",
+    description="64-band int8 embeddings, 10m, annual",
+    geoparquet_uri=(
+        "s3://us-west-2.opendata.source.coop/"
+        "tge-labs/aef/v1/annual/aef_index.parquet"
+    ),
+    column_map={"fid": "id", "geom": "geometry", "year": "datetime"},
+    href_column="path",
+    band_index_map={f"A{i:02d}": i for i in range(64)},
+    bbox_columns={
+        "minx": "wgs84_west",
+        "miny": "wgs84_south",
+        "maxx": "wgs84_east",
+        "maxy": "wgs84_north",
+    },
+    separate_files=False,
+    spatial_coverage="global",
+    temporal_range=("2018-01-01", "2023-12-31"),
+    license="CC-BY-4.0",
+    cloud_config={
+        "provider": "aws",
+        "region": "us-west-2",
+        "url_patterns": {
+            "s3://us-west-2.opendata.source.coop/": ("https://data.source.coop/"),
+        },
+    },
+)
+
+rasteret.register(descriptor)
+```
+
+See `/home/daytona/workspace/source/examples/aef_duckdb_query.py:1` for a complete example using this descriptor.
+
+## Sharing Descriptors
+
+To share a dataset descriptor with teammates:
+
+### Export to JSON
+
+```python
+from rasteret.catalog import export_local_descriptor
+from pathlib import Path
+
+export_path = export_local_descriptor(
+    dataset_id="local/my-collection",
+    output_path=Path("./shared/my_collection_descriptor.json"),
+)
+
+print(f"Exported to {export_path}")
+```
+
+### Import from JSON
+
+```python
+import json
+from rasteret import DatasetDescriptor
+
+with open("my_collection_descriptor.json") as f:
+    data = json.load(f)
+
+descriptor = DatasetDescriptor(**data)
+rasteret.register(descriptor)
+```
+
+## Best Practices
+
+### Namespacing
+
+Use namespaced IDs to avoid collisions:
+- `org/dataset`: For organization-owned datasets
+- `provider/collection`: For specific STAC provider variants (e.g. `pc/sentinel-2-l2a` vs `earthsearch/sentinel-2-l2a`)
+- `local/name`: For local collections
+
+### Band Naming
+
+Use consistent band codes across datasets:
+- Sentinel-2: `B01`, `B02`, ..., `B12`, `SCL`
+- Landsat: `B1`, `B2`, ..., `B7`, `qa_pixel`
+- Custom: Choose descriptive codes (e.g. `R`, `G`, `B`, `NIR`)
+
+### Documentation
+
+Include clear descriptions and license info:
+
+```python
+DatasetDescriptor(
+    id="my-org/dataset",
+    name="My Dataset",
+    description="Brief description (visible in CLI and docs)",
+    license="CC-BY-4.0",
+    license_url="https://creativecommons.org/licenses/by/4.0/",
+)
+```
+
+### Example Queries
+
+Provide example bbox/date ranges for testing:
+
+```python
+DatasetDescriptor(
+    id="my-org/dataset",
+    example_bbox=(11.3, 48.1, 11.5, 48.3),
+    example_date_range=("2024-06-01", "2024-06-30"),
+)
+```
+
+## Next Steps
+
+- [Building Collections](/guides/building-collections) - Use registered datasets with `rasteret.build()`
+- [Cloud Authentication](/guides/cloud-authentication) - Set up auth for private datasets
+- [Data Analysis](/guides/data-analysis) - Analyze pixel data from custom datasets

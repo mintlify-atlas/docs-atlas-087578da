@@ -1,0 +1,536 @@
+---
+title: "STAC Integration"
+description: "Build collections from any STAC API or static catalog"
+---
+
+## Overview
+
+Rasteret integrates with [SpatioTemporal Asset Catalog (STAC)](https://stacspec.org/) to enable discovery and indexing of cloud-optimized geospatial assets. The `build_from_stac()` function:
+
+- Searches STAC APIs with spatial/temporal/property filters
+- Parses COG headers to extract tiling metadata
+- Normalizes STAC items into a queryable collection
+- Supports both dynamic APIs and static catalogs
+
+## Basic Usage
+
+### Building from STAC API
+
+Create a collection from any STAC-compliant API:
+
+```python
+import rasteret
+
+collection = rasteret.build_from_stac(
+    name="bangalore-sentinel",
+    stac_api="https://earth-search.aws.element84.com/v1",
+    collection="sentinel-2-l2a",
+    bbox=(77.55, 13.01, 77.58, 13.08),
+    date_range=("2024-01-01", "2024-03-31"),
+)
+
+print(collection)
+# Collection('bangalore-sentinel', source='sentinel-2-l2a', bands=12, records=47)
+```
+
+**Key Parameters:**
+- `name`: Human-readable collection name
+- `stac_api`: STAC API endpoint URL
+- `collection`: STAC collection ID
+- `bbox`: Bounding box `(minx, miny, maxx, maxy)` in WGS84
+- `date_range`: Tuple of ISO date strings `(start, end)`
+
+### Supported STAC APIs
+
+Rasteret works with any STAC 1.0+ compliant API:
+
+| Provider | STAC API URL | Collections |
+|----------|-------------|-------------|
+| Earth Search | `https://earth-search.aws.element84.com/v1` | Sentinel-2, Landsat |
+| Planetary Computer | `https://planetarycomputer.microsoft.com/api/stac/v1` | 50+ datasets |
+| Google Earth Engine | `https://earthengine-stac.storage.googleapis.com/catalog/catalog.json` | Static catalog |
+| Radiant Earth MLHub | `https://api.radiant.earth/mlhub/v1` | Training datasets |
+
+## Query Parameters
+
+### Spatial Filtering
+
+Limit search to a region of interest:
+
+```python
+# Bounding box (WGS84 coordinates)
+bbox = (77.55, 13.01, 77.58, 13.08)  # (minx, miny, maxx, maxy)
+
+collection = rasteret.build_from_stac(
+    name="region-query",
+    stac_api="https://earth-search.aws.element84.com/v1",
+    collection="sentinel-2-l2a",
+    bbox=bbox,
+    date_range=("2024-01-01", "2024-12-31"),
+)
+```
+
+### Temporal Filtering
+
+Query specific time periods:
+
+```python
+# Single month
+date_range = ("2024-01-01", "2024-01-31")
+
+# Entire year
+date_range = ("2024-01-01", "2024-12-31")
+
+# Multi-year
+date_range = ("2022-01-01", "2024-12-31")
+
+collection = rasteret.build_from_stac(
+    name="temporal-query",
+    stac_api="https://earth-search.aws.element84.com/v1",
+    collection="sentinel-2-l2a",
+    bbox=(77.55, 13.01, 77.58, 13.08),
+    date_range=date_range,
+)
+```
+
+### Property Filtering
+
+Filter by STAC item properties:
+
+```python
+# Cloud cover threshold
+query = {
+    "eo:cloud_cover": {"lt": 10},  # Less than 10% clouds
+}
+
+collection = rasteret.build_from_stac(
+    name="low-cloud",
+    stac_api="https://earth-search.aws.element84.com/v1",
+    collection="sentinel-2-l2a",
+    bbox=(77.55, 13.01, 77.58, 13.08),
+    date_range=("2024-01-01", "2024-12-31"),
+    query=query,
+)
+```
+
+### Limiting Results
+
+Control the number of scenes:
+
+```python
+# Limit to 100 scenes for quick prototyping
+query = {"max_items": 100}
+
+collection = rasteret.build_from_stac(
+    name="sample-data",
+    stac_api="https://earth-search.aws.element84.com/v1",
+    collection="sentinel-2-l2a",
+    bbox=(77.55, 13.01, 77.58, 13.08),
+    date_range=("2024-01-01", "2024-12-31"),
+    query=query,
+)
+```
+
+<Note>
+  `max_items` is a Rasteret-specific control (not part of STAC spec). It limits total items fetched, useful for smoke tests.
+</Note>
+
+## Static Catalogs
+
+### Loading from Catalog.json
+
+Access static STAC catalogs (no `/search` endpoint):
+
+```python
+collection = rasteret.build_from_stac(
+    name="gee-landsat",
+    stac_api="https://earthengine-stac.storage.googleapis.com/catalog/LANDSAT_LC08_C02_T1_L2.json",
+    collection="LANDSAT_LC08_C02_T1_L2",
+    bbox=(77.55, 13.01, 77.58, 13.08),
+    date_range=("2024-01-01", "2024-03-31"),
+    static_catalog=True,  # Enable static catalog mode
+)
+```
+
+**Differences from API Mode:**
+- Filters applied client-side (slower for large catalogs)
+- No pagination control
+- Requires `static_catalog=True` flag
+
+### Traversing Hierarchical Catalogs
+
+Static catalogs can have nested structures:
+
+```python
+# Root catalog
+collection = rasteret.build_from_stac(
+    name="catalog-root",
+    stac_api="https://example.com/catalog.json",
+    collection="subcollection-id",  # Narrow to specific child
+    bbox=(77.55, 13.01, 77.58, 13.08),
+    date_range=("2024-01-01", "2024-03-31"),
+    static_catalog=True,
+)
+```
+
+Rasteret automatically:
+- Resolves relative asset hrefs to absolute URLs
+- Traverses child collections if `collection` parameter matches
+- Applies bbox/date filters during traversal
+
+## Advanced Configuration
+
+### Custom Band Mapping
+
+Override default band mappings:
+
+```python
+# NAIP dataset uses "image" asset for all bands
+band_map = {
+    "R": "image",
+    "G": "image",
+    "B": "image",
+    "NIR": "image",
+}
+
+band_index_map = {
+    "R": 0,
+    "G": 1,
+    "B": 2,
+    "NIR": 3,
+}
+
+collection = rasteret.build_from_stac(
+    name="naip-custom",
+    stac_api="https://planetarycomputer.microsoft.com/api/stac/v1",
+    collection="naip",
+    bbox=(-122.5, 37.7, -122.3, 37.9),
+    date_range=("2020-01-01", "2020-12-31"),
+    band_map=band_map,
+    band_index_map=band_index_map,
+)
+```
+
+### Cloud Provider Configuration
+
+Handle requester-pays and private buckets:
+
+```python
+from rasteret.cloud import CloudConfig
+
+# AWS requester-pays
+cloud_config = CloudConfig(
+    requester_pays=True,
+    region="us-west-2",
+)
+
+collection = rasteret.build_from_stac(
+    name="landsat-requester-pays",
+    stac_api="https://earth-search.aws.element84.com/v1",
+    collection="landsat-c2-l2",
+    bbox=(77.55, 13.01, 77.58, 13.08),
+    date_range=("2024-01-01", "2024-03-31"),
+    cloud_config=cloud_config,
+)
+```
+
+### Performance Tuning
+
+Control concurrent COG header parsing:
+
+```python
+collection = rasteret.build_from_stac(
+    name="fast-build",
+    stac_api="https://earth-search.aws.element84.com/v1",
+    collection="sentinel-2-l2a",
+    bbox=(77.55, 13.01, 77.58, 13.08),
+    date_range=("2024-01-01", "2024-03-31"),
+    max_concurrent=300,  # Default: 300
+)
+# Higher values speed up collection building
+```
+
+### Workspace Management
+
+Cache collections to avoid re-indexing:
+
+```python
+from pathlib import Path
+
+workspace = Path.home() / "my_rasteret_workspace"
+
+# First call: builds and caches
+collection = rasteret.build_from_stac(
+    name="cached-collection",
+    stac_api="https://earth-search.aws.element84.com/v1",
+    collection="sentinel-2-l2a",
+    bbox=(77.55, 13.01, 77.58, 13.08),
+    date_range=("2024-01-01", "2024-03-31"),
+    workspace_dir=workspace,
+)
+
+# Subsequent calls: loads from cache instantly
+collection = rasteret.build_from_stac(
+    name="cached-collection",
+    stac_api="https://earth-search.aws.element84.com/v1",
+    collection="sentinel-2-l2a",
+    bbox=(77.55, 13.01, 77.58, 13.08),
+    date_range=("2024-01-01", "2024-03-31"),
+    workspace_dir=workspace,
+)
+print("Loaded from cache!")
+```
+
+## Provider-Specific Examples
+
+### Planetary Computer
+
+Access Microsoft's Planetary Computer:
+
+```python
+# Requires SAS signing (handled automatically)
+collection = rasteret.build_from_stac(
+    name="pc-sentinel",
+    stac_api="https://planetarycomputer.microsoft.com/api/stac/v1",
+    collection="sentinel-2-l2a",
+    bbox=(77.55, 13.01, 77.58, 13.08),
+    date_range=("2024-01-01", "2024-03-31"),
+)
+```
+
+<Info>
+  Planetary Computer requires SAS token signing. Install `rasteret[azure]` for automatic signing, or use `backend=` with `PlanetaryComputerCredentialProvider` for native Azure authentication.
+</Info>
+
+### Landsat (Requester-Pays)
+
+Query Landsat on AWS:
+
+```python
+from rasteret.cloud import CloudConfig
+
+cloud_config = CloudConfig(
+    requester_pays=True,
+    region="us-west-2",
+)
+
+collection = rasteret.build_from_stac(
+    name="landsat-aws",
+    stac_api="https://earth-search.aws.element84.com/v1",
+    collection="landsat-c2-l2",
+    bbox=(77.55, 13.01, 77.58, 13.08),
+    date_range=("2024-01-01", "2024-03-31"),
+    cloud_config=cloud_config,
+)
+```
+
+<Warning>
+  Landsat on AWS is requester-pays. Ensure AWS credentials are configured via `aws configure` or environment variables.
+</Warning>
+
+### Radiant Earth MLHub
+
+Access training datasets:
+
+```python
+collection = rasteret.build_from_stac(
+    name="mlhub-dataset",
+    stac_api="https://api.radiant.earth/mlhub/v1",
+    collection="ref_african_crops_kenya_02",
+    bbox=(34.0, -1.5, 35.0, -0.5),
+    date_range=("2019-01-01", "2019-12-31"),
+)
+```
+
+## API Reference
+
+### `rasteret.build_from_stac()`
+
+Defined in `source/src/rasteret/__init__.py` (delegates to `StacCollectionBuilder`).
+
+**Signature:**
+```python
+def build_from_stac(
+    name: str,
+    stac_api: str,
+    collection: str,
+    bbox: tuple[float, float, float, float],
+    date_range: tuple[str, str],
+    *,
+    workspace_dir: Path | None = None,
+    query: dict[str, Any] | None = None,
+    band_map: dict[str, str] | None = None,
+    band_index_map: dict[str, int] | None = None,
+    cloud_config: CloudConfig | None = None,
+    max_concurrent: int = 300,
+    backend: StorageBackend | None = None,
+    static_catalog: bool = False,
+    force: bool = False,
+) -> Collection
+```
+
+**Parameters:**
+- `name`: Collection name (used for caching)
+- `stac_api`: STAC API endpoint or catalog.json URL
+- `collection`: STAC collection ID
+- `bbox`: Bounding box `(minx, miny, maxx, maxy)` in EPSG:4326
+- `date_range`: Temporal range `(start_date, end_date)` as ISO strings
+- `workspace_dir`: Cache directory (default: `~/rasteret_workspace`)
+- `query`: Additional STAC query parameters
+- `band_map`: Custom asset name mapping
+- `band_index_map`: Band index within multi-band assets
+- `cloud_config`: Cloud provider configuration
+- `max_concurrent`: Concurrent COG header requests
+- `backend`: Storage backend for native cloud reads
+- `static_catalog`: Enable static catalog mode
+- `force`: Rebuild even if cached version exists
+
+**Returns:**
+- `Collection`: Rasteret collection ready for querying
+
+### `StacCollectionBuilder`
+
+Low-level builder class defined in `source/src/rasteret/ingest/stac_indexer.py:37`.
+
+**Methods:**
+- `build()`: Synchronous wrapper around `build_index()`
+- `async build_index()`: Async STAC search and COG enrichment
+
+## Common Patterns
+
+### Multi-Region Collections
+
+Build separate collections per region:
+
+```python
+regions = [
+    ("bangalore", (77.55, 13.01, 77.58, 13.08)),
+    ("mumbai", (72.8, 19.0, 72.9, 19.1)),
+    ("delhi", (77.1, 28.5, 77.3, 28.7)),
+]
+
+collections = []
+for region_name, bbox in regions:
+    collection = rasteret.build_from_stac(
+        name=f"{region_name}-sentinel",
+        stac_api="https://earth-search.aws.element84.com/v1",
+        collection="sentinel-2-l2a",
+        bbox=bbox,
+        date_range=("2024-01-01", "2024-03-31"),
+    )
+    collections.append(collection)
+```
+
+### Incremental Updates
+
+Add new data to existing collection:
+
+```python
+# Initial build
+collection_q1 = rasteret.build_from_stac(
+    name="sentinel-q1",
+    stac_api="https://earth-search.aws.element84.com/v1",
+    collection="sentinel-2-l2a",
+    bbox=(77.55, 13.01, 77.58, 13.08),
+    date_range=("2024-01-01", "2024-03-31"),
+)
+
+# Later: build Q2 separately
+collection_q2 = rasteret.build_from_stac(
+    name="sentinel-q2",
+    stac_api="https://earth-search.aws.element84.com/v1",
+    collection="sentinel-2-l2a",
+    bbox=(77.55, 13.01, 77.58, 13.08),
+    date_range=("2024-04-01", "2024-06-30"),
+)
+
+# Combine via PyArrow
+import pyarrow as pa
+import pyarrow.dataset as ds
+
+table_q1 = collection_q1.dataset.to_table()
+table_q2 = collection_q2.dataset.to_table()
+combined_table = pa.concat_tables([table_q1, table_q2])
+
+# Create new collection
+combined = rasteret.Collection(
+    dataset=ds.InMemoryDataset(combined_table),
+    name="sentinel-2024-h1",
+    data_source="sentinel-2-l2a",
+)
+```
+
+## Troubleshooting
+
+### Empty Search Results
+
+Error: `No STAC scenes matched the request`
+
+**Solution:** Verify query parameters:
+```python
+# Check if STAC API is reachable
+import pystac_client
+client = pystac_client.Client.open("https://earth-search.aws.element84.com/v1")
+search = client.search(
+    collections=["sentinel-2-l2a"],
+    bbox=(77.55, 13.01, 77.58, 13.08),
+    datetime="2024-01-01/2024-01-31",
+)
+print(f"Found {search.matched()} items")
+```
+
+### SAS Signing Failures
+
+Error: `Planetary Computer SAS signing was rate-limited (HTTP 429)`
+
+**Solution:** Use subscription key or obstore backend:
+```bash
+# Option 1: Set subscription key
+export PC_SDK_SUBSCRIPTION_KEY="your-key"
+
+# Option 2: Use obstore backend
+pip install rasteret[azure]
+```
+
+```python
+try:
+    from obstore.auth.planetary_computer import PlanetaryComputerCredentialProvider
+    from obstore.store import AzureStore
+    
+    auth = PlanetaryComputerCredentialProvider()
+    backend = AzureStore(container="...", credential=auth)
+except ImportError:
+    backend = None
+
+collection = rasteret.build_from_stac(
+    ...,
+    backend=backend,
+)
+```
+
+### Missing COG Metadata
+
+Error: `COG header enrichment produced no band metadata`
+
+**Solution:** Verify `band_map` matches STAC asset keys:
+```python
+import pystac_client
+
+client = pystac_client.Client.open("https://earth-search.aws.element84.com/v1")
+search = client.search(collections=["sentinel-2-l2a"], max_items=1)
+item = next(search.items())
+
+print("Available assets:")
+for key in item.assets.keys():
+    print(f"  {key}")
+
+# Update band_map to match
+band_map = {"B04": "red", "B03": "green", "B02": "blue"}
+```
+
+## Related Resources
+
+- [STAC Specification](https://stacspec.org/)
+- [Building Collections Guide](/guides/building-collections)
+- [Example: build_collection_from_parquet.py](https://github.com/terrafloww/rasteret/blob/main/examples/build_collection_from_parquet.py)
+- [Dataset Catalog](/concepts/dataset-catalog) for pre-configured STAC endpoints

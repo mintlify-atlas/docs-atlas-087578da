@@ -1,0 +1,314 @@
+---
+title: Filtering & Queries
+description: Filter Collections by cloud cover, date, geometry, and custom attributes using subset() and Arrow expressions
+---
+
+Once you've built a Collection, you'll often want to narrow it down to specific scenes before loading pixel data. Rasteret provides high-level filtering methods and low-level Arrow expressions for maximum flexibility.
+
+## Quick Filtering with subset()
+
+The `subset()` method returns a filtered **view** of the Collection (no data copying):
+
+```python
+import rasteret
+
+collection = rasteret.build(
+    "earthsearch/sentinel-2-l2a",
+    name="madrid",
+    bbox=(-3.75, 40.38, -3.65, 40.48),
+    date_range=("2024-01-01", "2024-06-30"),
+)
+
+print(f"Original: {len(collection)} scenes")
+
+# Filter by cloud cover
+filtered = collection.subset(cloud_cover_lt=15)
+print(f"Cloud < 15%: {len(filtered)} scenes")
+```
+
+**Key filters:**
+- `cloud_cover_lt`: Keep scenes with `eo:cloud_cover` below this threshold (0-100)
+- `date_range`: Temporal range `("2024-03-01", "2024-04-30")`
+- `bbox`: Spatial extent `(minx, miny, maxx, maxy)`
+- `geometries`: Filter by one or more geometries
+- `split`: Filter by a split column (e.g. `"train"`, `"val"`, `"test"`)
+
+### Combining Filters
+
+All filters are combined with AND:
+
+```python
+# Cloud < 10% + March 2024 + specific bbox
+filtered = collection.subset(
+    cloud_cover_lt=10,
+    date_range=("2024-03-01", "2024-03-31"),
+    bbox=(-3.72, 40.40, -3.68, 40.44),
+)
+
+print(f"Combined filters: {len(filtered)} scenes")
+```
+
+## Temporal Filtering
+
+```python
+# Spring 2024
+spring = collection.subset(date_range=("2024-03-01", "2024-05-31"))
+
+# Single month
+april = collection.subset(date_range=("2024-04-01", "2024-04-30"))
+```
+
+## Spatial Filtering
+
+### Bounding Box
+
+```python
+# Filter by bbox (WGS84 / EPSG:4326)
+subset = collection.subset(bbox=(-122.45, 37.75, -122.35, 37.85))
+```
+
+**Requirements:** The Collection must have scalar bbox columns (`bbox_minx`, `bbox_miny`, `bbox_maxx`, `bbox_maxy`). Collections built with `rasteret>=1.0.0` include these automatically.
+
+### Geometries
+
+Filter by one or more geometries (points, polygons, etc.):
+
+```python
+import geopandas as gpd
+from shapely.geometry import box
+
+# From Shapely
+aoi = box(-122.45, 37.75, -122.35, 37.85)
+filtered = collection.subset(geometries=aoi)
+
+# From GeoDataFrame
+aois = gpd.read_file("regions.geojson")
+filtered = collection.subset(geometries=aois.geometry)
+
+# Multiple bboxes as tuples
+bboxes = [
+    (-122.45, 37.75, -122.35, 37.85),
+    (-122.50, 37.70, -122.40, 37.80),
+]
+filtered = collection.subset(geometries=bboxes)
+```
+
+**Note:** Geometry filtering uses **bbox overlap** (not full intersection). A scene is kept if its bbox overlaps any input geometry's bbox.
+
+## Cloud Cover Filtering
+
+```python
+# Very clear scenes
+clear = collection.subset(cloud_cover_lt=5)
+
+# Acceptable for analysis
+usable = collection.subset(cloud_cover_lt=20)
+
+# Combine with temporal filter
+summer_clear = collection.subset(
+    cloud_cover_lt=10,
+    date_range=("2024-06-01", "2024-08-31"),
+)
+```
+
+## Split Filtering (ML Workflows)
+
+If you've annotated your Collection with train/val/test splits:
+
+```python
+# Filter to training split
+train = collection.subset(split="train")
+
+# Or use the convenience method
+train = collection.select_split("train")
+
+# Multiple splits
+train_val = collection.subset(split=["train", "val"])
+```
+
+See the [ML Training guide](/guides/ml-training) for details on assigning splits.
+
+## Advanced: Arrow Expressions
+
+For custom queries, use `where()` with raw PyArrow expressions:
+
+```python
+import pyarrow.dataset as ds
+
+# Cloud cover between 5 and 15%
+filtered = collection.where(
+    (ds.field("eo:cloud_cover") >= 5) &
+    (ds.field("eo:cloud_cover") < 15)
+)
+
+# Scenes from specific satellite
+filtered = collection.where(
+    ds.field("platform") == "sentinel-2b"
+)
+
+# Combined expression
+filtered = collection.where(
+    (ds.field("eo:cloud_cover") < 10) &
+    (ds.field("proj:epsg") == 32630)  # UTM zone 30N
+)
+```
+
+**Arrow operators:**
+- Comparisons: `==`, `!=`, `<`, `<=`, `>`, `>=`
+- Logic: `&` (AND), `|` (OR), `~` (NOT)
+- Membership: `ds.field("column").isin([val1, val2])`
+- Pattern matching: `ds.field("id").match_substring("S2A_")`
+
+### Complex Queries
+
+```python
+# Sentinel-2A scenes in summer with low cloud cover
+expr = (
+    ds.field("platform").match_substring("sentinel-2a") &
+    (ds.field("eo:cloud_cover") < 15) &
+    (ds.field("datetime") >= pd.Timestamp("2024-06-01")) &
+    (ds.field("datetime") <= pd.Timestamp("2024-08-31"))
+)
+
+filtered = collection.where(expr)
+```
+
+## Combining Methods
+
+You can chain `subset()` and `where()` calls:
+
+```python
+# High-level filter first
+spring = collection.subset(
+    date_range=("2024-03-01", "2024-05-31"),
+    cloud_cover_lt=20,
+)
+
+# Then apply custom logic
+final = spring.where(
+    ds.field("proj:epsg").isin([32630, 32631])  # Specific UTM zones
+)
+```
+
+## Inspecting Results
+
+```python
+# Count scenes
+print(f"Total: {len(filtered)} scenes")
+
+# View summary
+print(filtered.describe())
+
+# Check date range
+if filtered.start_date and filtered.end_date:
+    print(f"Date range: {filtered.start_date} to {filtered.end_date}")
+
+# Available bands
+print(f"Bands: {filtered.bands}")
+
+# Spatial extent
+if filtered.bounds:
+    print(f"Bounds: {filtered.bounds}")
+```
+
+## Real-World Example: Multi-Season Analysis
+
+```python
+import rasteret
+
+# Build once
+collection = rasteret.build(
+    "earthsearch/sentinel-2-l2a",
+    name="farm-monitoring",
+    bbox=(11.3, 48.1, 11.5, 48.3),
+    date_range=("2024-01-01", "2024-12-31"),
+)
+
+# Define seasons
+seasons = {
+    "winter": collection.subset(
+        date_range=("2024-01-01", "2024-02-29"),
+        cloud_cover_lt=30,  # More lenient in winter
+    ),
+    "spring": collection.subset(
+        date_range=("2024-03-01", "2024-05-31"),
+        cloud_cover_lt=15,
+    ),
+    "summer": collection.subset(
+        date_range=("2024-06-01", "2024-08-31"),
+        cloud_cover_lt=10,  # Clearest season
+    ),
+    "fall": collection.subset(
+        date_range=("2024-09-01", "2024-11-30"),
+        cloud_cover_lt=15,
+    ),
+}
+
+for season_name, subset in seasons.items():
+    print(f"{season_name}: {len(subset)} scenes")
+```
+
+## Performance Notes
+
+### Fast Operations
+
+- `subset()` and `where()` create **views** (no data copying)
+- Filters are applied lazily (only evaluated when reading pixels)
+- Arrow predicate pushdown means filtering happens at the Parquet scan level
+
+### Column Availability
+
+Some filters require specific columns:
+- `cloud_cover_lt`: Requires `eo:cloud_cover`
+- `bbox`: Requires `bbox_minx`, `bbox_miny`, `bbox_maxx`, `bbox_maxy`
+- `geometries`: Requires scalar bbox columns
+- `split`: Requires a split column (you must add this via PyArrow after building)
+
+If a required column is missing, Rasteret raises a `ValueError` with a clear message.
+
+## Common Patterns
+
+### Best Scene Per Month
+
+```python
+import pandas as pd
+import pyarrow.compute as pc
+
+# Get table and find best scene per month
+table = collection.dataset.to_table(
+    columns=["id", "datetime", "eo:cloud_cover", "year", "month"]
+)
+
+best = (
+    table.group_by(["year", "month"])
+    .aggregate([("eo:cloud_cover", "min")])
+)
+
+print(best.to_pandas())
+```
+
+### Exclude Bad Scenes
+
+```python
+# Scenes to exclude (known issues)
+bad_ids = ["scene_123", "scene_456"]
+
+filtered = collection.where(
+    ~ds.field("id").isin(bad_ids)
+)
+```
+
+### UTM Zone Consistency
+
+```python
+# Keep only scenes in UTM zone 32N
+utm_32n = collection.where(
+    ds.field("proj:epsg") == 32632
+)
+```
+
+## Next Steps
+
+- [Data Analysis](/guides/data-analysis) - Load filtered scenes as xarray, NumPy, or GeoDataFrames
+- [ML Training](/guides/ml-training) - Use filtered Collections with TorchGeo
+- [Building Collections](/guides/building-collections) - Add custom metadata columns for filtering

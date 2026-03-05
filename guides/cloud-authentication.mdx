@@ -1,0 +1,336 @@
+---
+title: Cloud Authentication
+description: Configure credentials for Planetary Computer, NASA Earthdata, AWS requester-pays, and other authenticated datasets
+---
+
+Many satellite data archives require authentication for access. Rasteret supports credential providers via the [obstore](https://github.com/earth-mover/obstore) library, making it easy to work with Planetary Computer, NASA Earthdata, AWS requester-pays, and custom endpoints.
+
+## Quick Start: Planetary Computer
+
+The Microsoft Planetary Computer uses SAS token signing for Azure Blob Storage:
+
+```python
+import rasteret
+from obstore.auth.planetary_computer import PlanetaryComputerCredentialProvider
+
+# Create a backend with Planetary Computer credentials
+backend = rasteret.create_backend(
+    credential_provider=PlanetaryComputerCredentialProvider(
+        "https://planetarycomputer.microsoft.com/api/sas/v1/token"
+    ),
+)
+
+# Use the backend for building (COG header parsing)
+collection = rasteret.build(
+    "pc/sentinel-2-l2a",
+    name="pc-example",
+    bbox=(-122.5, 37.7, -122.3, 37.9),
+    date_range=("2024-06-01", "2024-07-15"),
+    backend=backend,
+)
+
+# Use the backend for pixel reads
+ds = collection.get_xarray(
+    geometries=(-122.45, 37.75, -122.35, 37.85),
+    bands=["B04", "B03", "B02"],
+    backend=backend,
+)
+```
+
+**Installation:**
+```bash
+pip install rasteret[planetary-computer]
+```
+
+## NASA Earthdata (LP DAAC)
+
+NASA datasets (e.g. HLS, EMIT) require Earthdata credentials:
+
+```python
+import rasteret
+from obstore.auth.earthdata import NasaEarthdataCredentialProvider
+
+# Create backend with Earthdata credentials
+backend = rasteret.create_backend(
+    credential_provider=NasaEarthdataCredentialProvider(
+        credentials_url="https://data.lpdaac.earthdatacloud.nasa.gov/s3credentials",
+    ),
+    region="us-west-2",  # LP DAAC data is in us-west-2
+)
+
+# Use with registered datasets
+collection = rasteret.build(
+    "earthdata/hls",  # Example (not pre-registered)
+    name="hls-example",
+    bbox=(-122.5, 37.7, -122.3, 37.9),
+    date_range=("2024-06-01", "2024-07-15"),
+    backend=backend,
+)
+```
+
+**Setup:**
+1. Create an Earthdata account: https://urs.earthdata.nasa.gov/users/new
+2. Add credentials to `~/.netrc`:
+   ```
+   machine urs.earthdata.nasa.gov
+   login YOUR_USERNAME
+   password YOUR_PASSWORD
+   ```
+
+**Installation:**
+```bash
+pip install rasteret[earthdata]
+```
+
+## AWS Requester-Pays
+
+Some datasets (e.g. Landsat on Earth Search) use requester-pays buckets:
+
+```python
+import rasteret
+
+# For Landsat, credentials + requester-pays config are pre-registered
+# You just need AWS credentials in your environment
+collection = rasteret.build(
+    "earthsearch/landsat-c2-l2",
+    name="landsat-example",
+    bbox=(-122.5, 37.7, -122.3, 37.9),
+    date_range=("2024-06-01", "2024-07-15"),
+)
+```
+
+**Setup AWS credentials:**
+1. Install AWS CLI: `pip install awscli`
+2. Configure credentials: `aws configure`
+3. Or set environment variables:
+   ```bash
+   export AWS_ACCESS_KEY_ID=your_key
+   export AWS_SECRET_ACCESS_KEY=your_secret
+   export AWS_SESSION_TOKEN=your_token  # Optional
+   ```
+
+Rasteret will automatically detect AWS credentials via boto3.
+
+## Custom S3 Backends
+
+For custom S3-compatible storage:
+
+```python
+import rasteret
+
+backend = rasteret.create_backend(
+    region="us-east-1",
+    default_s3_config={
+        "region": "us-east-1",
+        "skip_signature": "true",  # For anonymous access
+    },
+)
+
+# Or with explicit credentials
+backend = rasteret.create_backend(
+    default_s3_config={
+        "region": "us-west-2",
+        "aws_access_key_id": "YOUR_KEY",
+        "aws_secret_access_key": "YOUR_SECRET",
+    },
+)
+
+collection = rasteret.build_from_stac(
+    name="custom-s3",
+    stac_api="https://stac.example.com/v1",
+    collection="my-collection",
+    bbox=(11.3, 48.1, 11.5, 48.3),
+    date_range=("2024-01-01", "2024-06-30"),
+    backend=backend,
+)
+```
+
+## Cloud Configuration
+
+For datasets with URL rewriting or requester-pays, register a `CloudConfig`:
+
+```python
+from rasteret import CloudConfig
+
+# Register a cloud config for your dataset
+CloudConfig.register(
+    "my-collection",
+    CloudConfig(
+        provider="aws",
+        requester_pays=True,
+        region="eu-central-1",
+        url_patterns={
+            "https://cdn.example.com/": "s3://my-bucket/",
+        },
+    ),
+)
+
+# Now Rasteret will auto-create a backend for this dataset
+collection = rasteret.build(
+    "my-org/my-collection",
+    name="example",
+    bbox=(11.3, 48.1, 11.5, 48.3),
+    date_range=("2024-01-01", "2024-06-30"),
+)
+```
+
+**CloudConfig fields:**
+- `provider`: `"aws"`, `"gcp"`, `"azure"`
+- `requester_pays`: `True` if the bucket requires requester-pays
+- `region`: S3 region (e.g. `"us-west-2"`)
+- `url_patterns`: URL rewrite rules (HTTP → S3 paths)
+
+## Backend Lifecycle
+
+Backends are used in two places:
+
+### 1. Build Time (COG Header Parsing)
+
+When you call `build()` or `build_from_stac()`, Rasteret fetches COG headers to extract tile metadata:
+
+```python
+backend = rasteret.create_backend(...)
+
+collection = rasteret.build(
+    "pc/sentinel-2-l2a",
+    name="example",
+    bbox=BBOX,
+    date_range=DATE_RANGE,
+    backend=backend,  # Used for COG header parsing
+)
+```
+
+### 2. Read Time (Pixel Fetching)
+
+When you call `get_xarray()`, `get_numpy()`, or `to_torchgeo_dataset()`, Rasteret reads pixel data:
+
+```python
+ds = collection.get_xarray(
+    geometries=aoi,
+    bands=["B04", "B03", "B02"],
+    backend=backend,  # Used for pixel reads
+)
+
+# Or with TorchGeo
+dataset = collection.to_torchgeo_dataset(
+    bands=["B04", "B03", "B02"],
+    chip_size=256,
+    backend=backend,
+)
+```
+
+**Auto-backend:** If you registered a `CloudConfig` for the dataset, Rasteret will auto-create a backend for reads (no need to pass `backend=` explicitly).
+
+## Credential Caching
+
+Credential providers cache tokens automatically:
+- **Planetary Computer**: SAS tokens are cached for ~1 hour
+- **NASA Earthdata**: S3 temporary credentials are cached for ~1 hour
+- **AWS**: boto3 handles credential refresh automatically
+
+You don't need to manually refresh tokens.
+
+## Environment Variables
+
+Common environment variables:
+
+### AWS
+```bash
+export AWS_ACCESS_KEY_ID=your_key
+export AWS_SECRET_ACCESS_KEY=your_secret
+export AWS_SESSION_TOKEN=your_token  # Optional
+export AWS_REGION=us-west-2
+export AWS_PROFILE=my-profile  # Use a specific profile
+```
+
+### NASA Earthdata
+```bash
+# Credentials go in ~/.netrc (see above)
+```
+
+### Planetary Computer
+```bash
+# No environment variables needed (uses public SAS token endpoint)
+```
+
+## Troubleshooting
+
+### PermissionError: Access Denied
+
+**Cause:** Missing or invalid credentials.
+
+**Fix:**
+1. Check that credentials are set (AWS: `aws configure`, Earthdata: `~/.netrc`)
+2. Verify credentials are valid: `aws s3 ls s3://bucket` (for AWS)
+3. Ensure the backend is passed to both `build()` and read calls
+
+### Region Mismatch
+
+**Cause:** Trying to access a requester-pays bucket from a different region.
+
+**Fix:** Set the correct region:
+```python
+backend = rasteret.create_backend(region="us-west-2")
+```
+
+### Expired Credentials
+
+**Cause:** Temporary credentials (e.g. Earthdata) have expired.
+
+**Fix:** Credential providers automatically refresh tokens. If you're seeing errors, check that your base credentials (in `~/.netrc` or AWS config) are still valid.
+
+## Examples
+
+### Planetary Computer with Sentinel-2
+
+```python
+import rasteret
+from obstore.auth.planetary_computer import PlanetaryComputerCredentialProvider
+
+backend = rasteret.create_backend(
+    credential_provider=PlanetaryComputerCredentialProvider(
+        "https://planetarycomputer.microsoft.com/api/sas/v1/token"
+    ),
+)
+
+collection = rasteret.build(
+    "pc/sentinel-2-l2a",
+    name="pc-s2",
+    bbox=(11.3, 48.1, 11.5, 48.3),
+    date_range=("2024-06-01", "2024-06-30"),
+    backend=backend,
+)
+
+ds = collection.get_xarray(
+    geometries=(11.35, 48.15, 11.45, 48.25),
+    bands=["B04", "B03", "B02"],
+    backend=backend,
+)
+```
+
+### Landsat with AWS Requester-Pays
+
+```python
+import rasteret
+
+# Ensure AWS credentials are configured
+collection = rasteret.build(
+    "earthsearch/landsat-c2-l2",
+    name="landsat-aws",
+    bbox=(-122.5, 37.7, -122.3, 37.9),
+    date_range=("2024-06-01", "2024-06-30"),
+)
+
+ds = collection.get_xarray(
+    geometries=(-122.45, 37.75, -122.35, 37.85),
+    bands=["B4", "B5"],  # Red, NIR
+)
+```
+
+See `/home/daytona/workspace/source/examples/landsat_xarray.py:1` for a complete example.
+
+## Next Steps
+
+- [Building Collections](/guides/building-collections) - Use authenticated datasets
+- [Custom Datasets](/guides/custom-datasets) - Register private datasets with auth requirements
+- [Data Analysis](/guides/data-analysis) - Analyze authenticated data

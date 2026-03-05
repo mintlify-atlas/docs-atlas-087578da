@@ -1,0 +1,166 @@
+---
+title: Introduction
+description: Index-first, fast GeoTIFF access layer for ML and analysis
+---
+
+# Welcome to Rasteret
+
+**Rasteret** is an index-first access layer for cloud-native GeoTIFF collections, built to eliminate cold start overhead in ML and analysis workflows.
+
+<Note>
+  Every cold start re-parses satellite image metadata over HTTP—per scene, per band. Rasteret parses those headers **once**, caches them in Parquet, and delivers **up to 20x faster** reads on cold starts.
+</Note>
+
+## The Problem
+
+Sentinel-2, Landsat, NAIP, and other satellite imagery require metadata parsing before each pixel read. Your colleague did it last Tuesday, CI did it overnight, PyTorch respawns DataLoader workers every epoch. A single project repeats **millions of redundant requests** before a pixel moves.
+
+## The Solution
+
+Rasteret calls this pattern **index-first geospatial retrieval**:
+
+<CardGroup cols={2}>
+  <Card title="Control Plane" icon="table">
+    A queryable Parquet index storing scene metadata, COG header metadata, and user columns like splits/labels
+  </Card>
+  <Card title="Data Plane" icon="satellite">
+    On-demand tile reads from original GeoTIFF/COG objects with no GDAL in the critical path
+  </Card>
+</CardGroup>
+
+This keeps metadata and experiment logic in tables while leaving imagery bytes in source COGs.
+
+## Key Features
+
+<CardGroup cols={2}>
+  <Card title="Easy" icon="rocket">
+    Three lines from STAC search or Parquet file to a TorchGeo-compatible dataset
+  </Card>
+  <Card title="20x Faster" icon="bolt">
+    Custom IO gets chunks fast with zero overhead once Collection is built
+  </Card>
+  <Card title="Zero Downloads" icon="cloud">
+    Work with terabytes of imagery while storing only megabytes of metadata
+  </Card>
+  <Card title="No STAC at Training" icon="shield-check">
+    Query once at setup, zero API calls during training
+  </Card>
+  <Card title="Reproducible" icon="repeat">
+    Same Parquet index = same records = same results
+  </Card>
+  <Card title="Native dtypes" icon="code">
+    uint16 stays uint16 in tensors—no unnecessary type promotion
+  </Card>
+</CardGroup>
+
+## Architecture Overview
+
+Rasteret integrates with your existing workflow as an **opt-in accelerator**:
+
+```mermaid
+graph LR
+    A[STAC API / GeoParquet] --> B[build\(\)]
+    B --> C[Parquet Index\n+ COG Headers]
+    C --> D[Collection]
+    D --> E[TorchGeo Dataset]
+    D --> F[xarray]
+    D --> G[NumPy]
+    D --> H[GeoPandas]
+```
+
+The Collection is a standard TorchGeo `GeoDataset`. Your samplers, DataLoader, xarray workflows, and analysis tools stay the same—Rasteret handles the async tile I/O underneath.
+
+## What's Included
+
+### Built-in Dataset Catalog
+
+Rasteret ships with a growing catalog of datasets—each entry includes license metadata and a `commercial_use` flag:
+
+- **Sentinel-2 Level-2A** (global, free)
+- **Landsat Collection 2 Level-2** (global, free)
+- **NAIP** (North America, free)
+- **Copernicus DEM** (global, 30m/90m)
+- **ESRI Land Use/Land Cover** (global, CC-BY-4.0)
+- **AlphaEarth Foundation Embeddings** (global, CC-BY-4.0)
+- And more...
+
+List all available datasets:
+
+```bash
+rasteret datasets list
+```
+
+### Multiple Access Patterns
+
+<Tabs>
+  <Tab title="Built-in Catalog">
+    ```python
+    collection = rasteret.build(
+        "earthsearch/sentinel-2-l2a",
+        name="training_data",
+        bbox=(77.5, 12.9, 77.7, 13.1),
+        date_range=("2024-01-01", "2024-06-30"),
+    )
+    ```
+  </Tab>
+  <Tab title="Any STAC API">
+    ```python
+    collection = rasteret.build_from_stac(
+        name="custom_stac",
+        stac_api="https://api.example.com",
+        collection="sentinel-2-l2a",
+        bbox=(-122.5, 37.7, -122.3, 37.9),
+        date_range=("2024-01-01", "2024-12-31"),
+    )
+    ```
+  </Tab>
+  <Tab title="GeoParquet/Parquet">
+    ```python
+    collection = rasteret.build_from_table(
+        "s3://bucket/index.parquet",
+        name="source_coop_data",
+        href_column="url",
+        enrich_cog=True,
+    )
+    ```
+  </Tab>
+</Tabs>
+
+## Performance
+
+### Cold-Start Comparison
+
+Same AOIs, same scenes, same sampler, same DataLoader:
+
+| Scenario | rasterio/GDAL | Rasteret | Speedup |
+|---|---|---|---|
+| Single AOI, 15 scenes | 9.08 s | 1.14 s | **8x** |
+| Multi-AOI, 30 scenes | 42.05 s | 2.25 s | **19x** |
+| Cross-CRS boundary, 12 scenes | 12.47 s | 0.59 s | **21x** |
+
+<Note>
+  Measured on AWS t3.xlarge (4 CPU) in us-west-2. The difference comes from how headers are accessed: rasterio/GDAL re-parses IFDs over HTTP on each cold start, while Rasteret reads them from a local Parquet cache.
+</Note>
+
+## Who Should Use Rasteret?
+
+Rasteret is optimized for:
+
+✅ **ML training pipelines** with PyTorch/TorchGeo  
+✅ **Analysis workflows** requiring repeated reads of the same imagery  
+✅ **Remote, tiled GeoTIFFs** (Cloud-Optimized GeoTIFFs)  
+✅ **Large-scale experiments** where cold starts dominate runtime  
+✅ **Reproducible research** requiring version-controlled data splits
+
+Rasteret works with local tiled GeoTIFFs for indexing, filtering, and sharing collections. For non-tiled TIFFs and non-TIFF formats, TorchGeo or rasterio remain the better choice.
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Installation" icon="download" href="/installation">
+    Install Rasteret with pip or uv
+  </Card>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Build your first Collection in 5 minutes
+  </Card>
+</CardGroup>

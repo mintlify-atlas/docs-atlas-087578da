@@ -1,0 +1,209 @@
+---
+title: 'DatasetRegistry'
+description: 'Registry of dataset descriptors for known cloud-native raster collections'
+---
+
+## Class Definition
+
+```python
+class DatasetRegistry:
+    @classmethod
+    def register(cls, descriptor: DatasetDescriptor) -> None
+    
+    @classmethod
+    def unregister(cls, dataset_id: str) -> DatasetDescriptor | None
+    
+    @classmethod
+    def get(cls, dataset_id: str) -> DatasetDescriptor | None
+    
+    @classmethod
+    def list(cls) -> list[DatasetDescriptor]
+    
+    @classmethod
+    def search(cls, keyword: str) -> list[DatasetDescriptor]
+```
+
+## Description
+
+Registry of dataset descriptors. This is a proto-spec catalog that stores metadata for known cloud-native raster collections. Built-in datasets are registered at module import time. Users can add custom entries via `register()` or the top-level `rasteret.register()` helper.
+
+Each `DatasetDescriptor` captures identity, access, and band-mapping metadata for a collection. The registry auto-populates `BandRegistry` and `CloudConfig` keyed by STAC collection ID.
+
+## Class Methods
+
+### register()
+
+```python
+@classmethod
+def register(cls, descriptor: DatasetDescriptor) -> None
+```
+
+Register a dataset descriptor. Also populates `BandRegistry` and `CloudConfig` keyed by the descriptor ID so that provider-specific conventions do not collide.
+
+<ParamField path="descriptor" type="DatasetDescriptor" required>
+  The descriptor to register. See `DatasetDescriptor` class.
+</ParamField>
+
+### unregister()
+
+```python
+@classmethod
+def unregister(cls, dataset_id: str) -> DatasetDescriptor | None
+```
+
+Remove a descriptor from the in-memory registry.
+
+<ParamField path="dataset_id" type="str" required>
+  Full namespaced ID (e.g., `"earthsearch/sentinel-2-l2a"`).
+</ParamField>
+
+<ResponseField name="descriptor" type="DatasetDescriptor | None">
+  The removed descriptor, or `None` if not found.
+</ResponseField>
+
+### get()
+
+```python
+@classmethod
+def get(cls, dataset_id: str) -> DatasetDescriptor | None
+```
+
+Look up a descriptor by namespaced ID.
+
+<ParamField path="dataset_id" type="str" required>
+  Full namespaced ID (e.g., `"earthsearch/sentinel-2-l2a"`).
+</ParamField>
+
+<ResponseField name="descriptor" type="DatasetDescriptor | None">
+  The descriptor, or `None` if not found.
+</ResponseField>
+
+### list()
+
+```python
+@classmethod
+def list(cls) -> list[DatasetDescriptor]
+```
+
+Return all registered descriptors.
+
+<ResponseField name="descriptors" type="list[DatasetDescriptor]">
+  List of all registered dataset descriptors.
+</ResponseField>
+
+### search()
+
+```python
+@classmethod
+def search(cls, keyword: str) -> list[DatasetDescriptor]
+```
+
+Search descriptors by keyword in ID, name, or description.
+
+<ParamField path="keyword" type="str" required>
+  Case-insensitive search term.
+</ParamField>
+
+<ResponseField name="results" type="list[DatasetDescriptor]">
+  Descriptors matching the search term.
+</ResponseField>
+
+## DatasetDescriptor
+
+```python
+@dataclass(frozen=True)
+class DatasetDescriptor:
+    # Identity
+    id: str
+    name: str
+    description: str = ""
+    
+    # Access
+    stac_api: str | None = None
+    stac_collection: str | None = None
+    geoparquet_uri: str | None = None
+    column_map: dict[str, str] | None = None
+    
+    # GeoParquet normalization hints
+    href_column: str | None = None
+    band_index_map: dict[str, int] | None = None
+    bbox_columns: dict[str, str] | None = None
+    
+    # Band mapping
+    band_map: dict[str, str] | None = None
+    separate_files: bool = True
+    
+    # Coverage metadata
+    spatial_coverage: str = ""
+    temporal_range: tuple[str, str] | None = None
+    requires_auth: bool = False
+    license: str = ""
+    license_url: str = ""
+    commercial_use: bool = True
+    
+    # Static STAC catalog support
+    static_catalog: bool = False
+    
+    # Auth / Cloud configuration
+    s3_credentials_url: str | None = None
+    cloud_config: dict[str, str] | None = None
+    example_bbox: tuple[float, float, float, float] | None = None
+    example_date_range: tuple[str, str] | None = None
+    
+    # Cross-references
+    torchgeo_class: str | None = None
+    torchgeo_verified: bool = False
+```
+
+A dataset descriptor containing identity, access, and band mapping metadata.
+
+## Usage Example
+
+```python
+import rasteret
+from rasteret.catalog import DatasetDescriptor
+
+# Register a custom dataset
+rasteret.register(DatasetDescriptor(
+    id="acme/field-survey-2024",
+    name="ACME Field Survey",
+    description="High-resolution RGB imagery from field surveys",
+    stac_api="https://acme.example.com/stac/v1",
+    stac_collection="field-survey-2024",
+    band_map={"R": "red", "G": "green", "B": "blue"},
+    separate_files=True,
+    spatial_coverage="regional",
+    temporal_range=("2024-01-01", "2024-12-31"),
+    license="CC-BY-4.0",
+    license_url="https://creativecommons.org/licenses/by/4.0/",
+))
+
+# List all datasets
+for desc in rasteret.DatasetRegistry.list():
+    print(f"{desc.id}: {desc.name}")
+
+# Search for datasets
+sentinel = rasteret.DatasetRegistry.search("sentinel")
+for desc in sentinel:
+    print(f"{desc.id}: {desc.description}")
+
+# Get a specific dataset
+desc = rasteret.DatasetRegistry.get("earthsearch/sentinel-2-l2a")
+if desc:
+    print(f"Found: {desc.name}")
+    print(f"STAC API: {desc.stac_api}")
+    print(f"Collection: {desc.stac_collection}")
+
+# Use a registered dataset
+collection = rasteret.build(
+    "acme/field-survey-2024",
+    name="field-survey",
+    bbox=(-122.5, 37.5, -122.0, 38.0),
+    date_range=("2024-06-01", "2024-06-30"),
+)
+```
+
+## Related Functions
+
+- [build()](/api/build) - Build a Collection from a registered dataset
+- [rasteret.register()](/api/build) - Register a dataset descriptor

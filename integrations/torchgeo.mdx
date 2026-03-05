@@ -1,0 +1,406 @@
+---
+title: "TorchGeo Integration"
+description: "Train ML models with PyTorch DataLoaders using Rasteret's TorchGeo adapter"
+---
+
+## Overview
+
+Rasteret provides seamless integration with [TorchGeo](https://github.com/microsoft/torchgeo) through the `RasteretGeoDataset` class. This adapter enables you to:
+
+- Load COG tiles on-the-fly via async HTTP range reads
+- Use TorchGeo samplers for spatial and temporal sampling
+- Train models with PyTorch DataLoaders
+- Stack temporal scenes into time series tensors
+- Handle multi-CRS datasets with automatic reprojection
+
+<Note>
+  TorchGeo integration requires installing optional dependencies:
+  ```bash
+  pip install rasteret[torchgeo]
+  ```
+</Note>
+
+## Basic Usage
+
+### Creating a TorchGeo Dataset
+
+Convert any Rasteret collection to a TorchGeo-compatible dataset:
+
+```python
+import rasteret
+from torchgeo.samplers import RandomGeoSampler
+from torch.utils.data import DataLoader
+from torchgeo.datasets.utils import stack_samples
+
+# Build or load a collection
+collection = rasteret.build_from_stac(
+    name="training-data",
+    stac_api="https://earth-search.aws.element84.com/v1",
+    collection="sentinel-2-l2a",
+    bbox=(77.55, 13.01, 77.58, 13.08),
+    date_range=("2024-01-01", "2024-06-30"),
+)
+
+# Create TorchGeo dataset
+dataset = collection.to_torchgeo_dataset(
+    bands=["B04", "B03", "B02", "B08"],  # RGB + NIR
+    chip_size=256,
+)
+
+print(f"Dataset CRS: EPSG:{dataset.epsg}")
+print(f"Dataset bounds: {dataset.bounds}")
+print(f"Resolution: {dataset._res}")
+```
+
+**Key Parameters:**
+- `bands`: List of band codes to load (e.g., `["B04", "B03", "B02"]`)
+- `chip_size`: Spatial extent of each chip in pixels
+- `is_image`: If `True` (default), returns `sample["image"]`; if `False`, returns `sample["mask"]`
+- `allow_resample`: Enable resampling when bands have different native resolutions
+
+### Training Loop with DataLoader
+
+Use standard PyTorch DataLoader patterns:
+
+```python
+# Create sampler for spatial/temporal sampling
+sampler = RandomGeoSampler(
+    dataset, 
+    size=256,      # Chip size in pixels
+    length=1000    # Number of samples per epoch
+)
+
+# Create DataLoader
+loader = DataLoader(
+    dataset,
+    sampler=sampler,
+    batch_size=4,
+    num_workers=2,
+    collate_fn=stack_samples,
+)
+
+# Training loop
+for epoch in range(num_epochs):
+    for batch in loader:
+        images = batch["image"]  # Shape: [B, C, H, W]
+        bounds = batch["bounds"] # Spatial bounds tensor
+        
+        # Your training code here
+        outputs = model(images)
+        loss = criterion(outputs, labels)
+        loss.backward()
+        optimizer.step()
+```
+
+**Sample Format:**
+Each sample is a dictionary with:
+- `image`: Tensor `[C, H, W]` in native COG dtype (e.g., `uint16` for Sentinel-2)
+- `bounds`: Tensor with spatial bounds
+- `transform`: Affine transform as tensor
+- `label`: Optional, if `label_field` was specified
+
+## Advanced Features
+
+### Supervised Learning with Labels
+
+Add labels from collection columns:
+
+```python
+import pyarrow as pa
+import pyarrow.compute as pc
+
+# Add labels to collection
+table = collection.dataset.to_table()
+labels = pa.array(["forest", "urban", "water"] * (len(table) // 3))
+table = table.append_column("land_cover", labels)
+
+# Update collection with labeled data
+from pyarrow import dataset as ds
+updated_dataset = ds.InMemoryDataset(table)
+collection.dataset = updated_dataset
+
+# Create dataset with labels
+dataset = collection.to_torchgeo_dataset(
+    bands=["B04", "B03", "B02"],
+    label_field="land_cover",  # Column name for labels
+)
+
+# Labels are included in samples
+for sample in loader:
+    images = sample["image"]
+    labels = sample["label"]  # Land cover labels
+```
+
+### Time Series Training
+
+Stack multiple temporal observations:
+
+```python
+dataset = collection.to_torchgeo_dataset(
+    bands=["B04", "B03", "B02"],
+    time_series=True,  # Stack all timesteps
+)
+
+sampler = RandomGeoSampler(dataset, size=256, length=100)
+loader = DataLoader(dataset, sampler=sampler, batch_size=2)
+
+for batch in loader:
+    images = batch["image"]  # Shape: [B, T, C, H, W]
+    # T = number of temporal scenes at this location
+    # Train temporal models (LSTMs, 3D CNNs, etc.)
+```
+
+<Info>
+  In time series mode, all spatially overlapping scenes are stacked regardless of the sampler's temporal slice. Use `collection.subset(date_range=...)` to limit the temporal range.
+</Info>
+
+### Train/Val/Test Splits
+
+Filter collections by split before creating datasets:
+
+```python
+import numpy as np
+
+# Assign splits (train=70%, val=15%, test=15%)
+table = collection.dataset.to_table()
+n = len(table)
+rng = np.random.default_rng(42)
+assignments = rng.random(n)
+
+splits = np.where(
+    assignments < 0.7,
+    "train",
+    np.where(assignments < 0.85, "val", "test"),
+)
+
+table = table.append_column("split", pa.array(splits))
+collection.dataset = ds.InMemoryDataset(table)
+
+# Create separate datasets per split
+train_ds = collection.to_torchgeo_dataset(
+    bands=["B04", "B03", "B02"],
+    split="train",
+)
+
+val_ds = collection.to_torchgeo_dataset(
+    bands=["B04", "B03", "B02"],
+    split="val",
+)
+```
+
+See `source/examples/ml_training_with_splits.py:127` for a complete example.
+
+### Multi-CRS Datasets
+
+Handle collections spanning multiple UTM zones:
+
+```python
+# Collection spans multiple CRS zones (e.g., Sentinel-2 tiles)
+collection = rasteret.load("global-training-data")
+print(f"CRS zones: {collection.epsg}")  # [32643, 32644, 32645]
+
+# Option 1: Auto-reproject to most common CRS (default)
+dataset = collection.to_torchgeo_dataset(
+    bands=["B04", "B03", "B02"],
+)
+# Drops scenes from minority CRS zones
+
+# Option 2: Reproject all scenes to a target CRS
+dataset = collection.to_torchgeo_dataset(
+    bands=["B04", "B03", "B02"],
+    target_crs=32643,  # EPSG code
+)
+# All scenes are reprojected on-the-fly during sampling
+```
+
+<Warning>
+  Without `target_crs`, scenes from minority CRS zones are dropped with a warning. Set `target_crs` to preserve all data via automatic reprojection.
+</Warning>
+
+### Multi-Resolution Bands
+
+Some datasets have bands at different resolutions:
+
+```python
+# Sentinel-2: B02/B03/B04 at 10m, B05 at 20m
+dataset = collection.to_torchgeo_dataset(
+    bands=["B04", "B03", "B02", "B05"],
+    allow_resample=True,  # Resample B05 to 10m grid
+)
+```
+
+## Performance Optimization
+
+### Concurrent HTTP Requests
+
+Control parallelism for network-bound workloads:
+
+```python
+dataset = collection.to_torchgeo_dataset(
+    bands=["B04", "B03", "B02"],
+    max_concurrent=100,  # Default: 50
+)
+# Higher values improve throughput but increase memory usage
+```
+
+### Requester-Pays Buckets
+
+For AWS requester-pays datasets:
+
+```python
+from rasteret.cloud import CloudConfig
+
+cloud_config = CloudConfig(
+    requester_pays=True,
+    region="us-west-2",
+)
+
+dataset = collection.to_torchgeo_dataset(
+    bands=["B4", "B5"],
+    cloud_config=cloud_config,
+)
+```
+
+### Obstore Backend (Azure/GCS)
+
+Use native cloud storage clients:
+
+```python
+try:
+    import obstore
+    from obstore.store import AzureStore
+    
+    backend = AzureStore.from_url("az://container/path")
+except ImportError:
+    backend = None
+
+dataset = collection.to_torchgeo_dataset(
+    bands=["B04", "B03", "B02"],
+    backend=backend,  # Auto-detected if None
+)
+```
+
+## API Reference
+
+### `Collection.to_torchgeo_dataset()`
+
+Defined in `source/src/rasteret/core/collection.py:983`.
+
+**Signature:**
+```python
+def to_torchgeo_dataset(
+    self,
+    *,
+    bands: list[str],
+    chip_size: int | None = None,
+    is_image: bool = True,
+    allow_resample: bool = False,
+    split: str | Sequence[str] | None = None,
+    split_column: str = "split",
+    label_field: str | None = None,
+    geometries: Any = None,
+    geometries_crs: int = 4326,
+    transforms: Any = None,
+    max_concurrent: int = 50,
+    cloud_config: Any = None,
+    backend: Any = None,
+    time_series: bool = False,
+    target_crs: int | None = None,
+) -> RasteretGeoDataset
+```
+
+**Returns:**
+- `RasteretGeoDataset`: A TorchGeo `GeoDataset` compatible with all TorchGeo samplers and transforms
+
+### `RasteretGeoDataset`
+
+Defined in `source/src/rasteret/integrations/torchgeo.py:275`.
+
+**Attributes:**
+- `epsg`: CRS EPSG code for the dataset
+- `bounds`: Spatial extent `(minx, miny, maxx, maxy)`
+- `index`: GeoDataFrame with scene footprints and temporal intervals
+- `collection`: Reference to the source Rasteret collection
+
+**Methods:**
+- `close()`: Shut down the background async reader pool
+- `__getitem__(index)`: Return a sample for a given `GeoSlice` (called by TorchGeo samplers)
+
+## Common Patterns
+
+### Filtering Before Training
+
+Combine collection filtering with TorchGeo datasets:
+
+```python
+# Filter to low cloud cover scenes
+filtered = collection.subset(cloud_cover_lt=10)
+
+# Further filter to specific region
+training_region = (77.5, 13.0, 78.0, 13.5)
+regional = filtered.subset(bbox=training_region)
+
+# Create dataset from filtered collection
+dataset = regional.to_torchgeo_dataset(
+    bands=["B04", "B03", "B02"],
+)
+```
+
+### Spatial Extent Hints
+
+Limit dataset to specific geometries:
+
+```python
+import shapely
+
+# Define study area
+study_area = shapely.box(77.55, 13.01, 77.58, 13.08)
+
+dataset = collection.to_torchgeo_dataset(
+    bands=["B04", "B03", "B02"],
+    geometries=study_area,  # Only scenes intersecting this area
+    geometries_crs=4326,
+)
+```
+
+## Troubleshooting
+
+### Missing Metadata Columns
+
+Error: `Collection is missing required columns: ['B04_metadata']`
+
+**Solution:** Rebuild collection with COG enrichment:
+```python
+collection = rasteret.build_from_stac(
+    ...,
+    # COG enrichment is enabled by default
+)
+```
+
+### Resolution Mismatch
+
+Error: `All requested bands must share the same resolution`
+
+**Solution:** Enable resampling:
+```python
+dataset = collection.to_torchgeo_dataset(
+    bands=["B04", "B05"],  # Different resolutions
+    allow_resample=True,
+)
+```
+
+### Empty Dataset
+
+Error: `No valid records found for TorchGeo dataset creation`
+
+**Solution:** Check collection has required metadata:
+```python
+print(collection.bands)  # Should list available bands
+print(len(collection))   # Should be > 0
+```
+
+## Related Resources
+
+- [TorchGeo Documentation](https://torchgeo.readthedocs.io/)
+- [ML Training Guide](/guides/ml-training)
+- [Example: ml_training_with_splits.py](https://github.com/terrafloww/rasteret/blob/main/examples/ml_training_with_splits.py)

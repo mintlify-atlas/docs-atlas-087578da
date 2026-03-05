@@ -1,0 +1,512 @@
+---
+title: "xarray Integration"
+description: "Load satellite imagery into labeled multidimensional arrays for scientific analysis"
+---
+
+## Overview
+
+Rasteret integrates seamlessly with [xarray](https://xarray.dev) for scientific data analysis. The `get_xarray()` method converts COG tiles into labeled xarray Datasets with:
+
+- Named dimensions (`x`, `y`, `band`)
+- Coordinate arrays with spatial/spectral metadata
+- CF-compliant CRS encoding (spatial_ref coordinate)
+- Automatic multi-CRS reprojection and mosaicking
+
+## Basic Usage
+
+### Loading Data
+
+Convert any collection region to an xarray Dataset:
+
+```python
+import rasteret
+
+# Build or load a collection
+collection = rasteret.build_from_stac(
+    name="bangalore",
+    stac_api="https://earth-search.aws.element84.com/v1",
+    collection="sentinel-2-l2a",
+    bbox=(77.55, 13.01, 77.58, 13.08),
+    date_range=("2024-01-01", "2024-01-31"),
+)
+
+# Load RGB bands as xarray Dataset
+ds = collection.get_xarray(
+    geometries=(77.55, 13.01, 77.58, 13.08),
+    bands=["B04", "B03", "B02"],
+)
+
+print(ds)
+# <xarray.Dataset>
+# Dimensions:      (band: 3, y: 768, x: 683)
+# Coordinates:
+#   * band         (band) <U3 'B04' 'B03' 'B02'
+#   * y            (y) float64 ...
+#   * x            (x) float64 ...
+#     spatial_ref  int64 32643
+# Data variables:
+#     B04          (band, y, x) uint16 ...
+#     B03          (band, y, x) uint16 ...
+#     B02          (band, y, x) uint16 ...
+```
+
+**Key Parameters:**
+- `geometries`: Bounding box `(minx, miny, maxx, maxy)`, Shapely geometry, or GeoJSON
+- `bands`: List of band codes to load
+- `max_concurrent`: Number of parallel HTTP requests (default: 50)
+
+### Dataset Structure
+
+The returned xarray Dataset contains:
+
+```python
+# Dimensions
+ds.dims
+# {'band': 3, 'y': 768, 'x': 683}
+
+# Coordinates
+ds.coords
+# Coordinates:
+#   * band         (band) <U3 'B04' 'B03' 'B02'
+#   * y            (y) float64 1.444e+06 1.444e+06 ... 1.436e+06
+#   * x            (x) float64 7.755e+05 7.755e+05 ... 7.823e+05
+#     spatial_ref  int64 32643
+
+# Data variables (one per band)
+ds.data_vars
+# Data variables:
+#     B04  (band, y, x) uint16 ...
+#     B03  (band, y, x) uint16 ...
+#     B02  (band, y, x) uint16 ...
+
+# CRS metadata
+ds.spatial_ref.attrs
+# {'crs_wkt': 'PROJCS["WGS 84 / UTM zone 43N", ...]',
+#  'GeoTransform': '775500.0 10.0 0.0 1444000.0 0.0 -10.0'}
+```
+
+## Analysis Workflows
+
+### Band Math (NDVI)
+
+Perform normalized difference vegetation index calculation:
+
+```python
+# Load NIR and Red bands
+ds = collection.get_xarray(
+    geometries=(77.55, 13.01, 77.58, 13.08),
+    bands=["B08", "B04"],  # NIR, Red
+)
+
+# Calculate NDVI
+ndvi = (ds["B08"] - ds["B04"]) / (ds["B08"] + ds["B04"])
+
+print(f"NDVI range: [{float(ndvi.min()):.3f}, {float(ndvi.max()):.3f}]")
+# NDVI range: [-0.234, 0.876]
+
+# Add as new variable
+ds["NDVI"] = ndvi
+```
+
+### Spectral Indices
+
+Create derived products from multiple bands:
+
+```python
+ds = collection.get_xarray(
+    geometries=(77.55, 13.01, 77.58, 13.08),
+    bands=["B08", "B04", "B03"],  # NIR, Red, Green
+)
+
+# Enhanced Vegetation Index (EVI)
+L = 1.0
+C1 = 6.0
+C2 = 7.5
+evi = 2.5 * (
+    (ds["B08"] - ds["B04"]) / 
+    (ds["B08"] + C1 * ds["B04"] - C2 * ds["B03"] + L)
+)
+ds["EVI"] = evi
+
+# Green Chlorophyll Index (GCI)
+gci = (ds["B08"] / ds["B03"]) - 1
+ds["GCI"] = gci
+```
+
+### Spatial Aggregation
+
+Compute zonal statistics:
+
+```python
+import numpy as np
+
+ds = collection.get_xarray(
+    geometries=(77.55, 13.01, 77.58, 13.08),
+    bands=["B08", "B04"],
+)
+
+# Mean NDVI across entire region
+ndvi = (ds["B08"] - ds["B04"]) / (ds["B08"] + ds["B04"])
+mean_ndvi = float(ndvi.mean())
+print(f"Mean NDVI: {mean_ndvi:.3f}")
+
+# Standard deviation
+std_ndvi = float(ndvi.std())
+print(f"Std NDVI: {std_ndvi:.3f}")
+
+# Percentiles
+percentiles = np.percentile(ndvi.values, [25, 50, 75])
+print(f"NDVI quartiles: {percentiles}")
+```
+
+### Visualization
+
+Integrate with matplotlib:
+
+```python
+import matplotlib.pyplot as plt
+
+ds = collection.get_xarray(
+    geometries=(77.55, 13.01, 77.58, 13.08),
+    bands=["B04", "B03", "B02"],
+)
+
+# Plot single band
+fig, ax = plt.subplots(figsize=(10, 8))
+ds["B04"].plot(ax=ax, cmap="gray")
+ax.set_title("Sentinel-2 Band 4 (Red)")
+plt.show()
+
+# RGB composite (requires scaling to 0-1)
+rgb = np.stack([
+    ds["B04"].values / 3000,  # Red
+    ds["B03"].values / 3000,  # Green
+    ds["B02"].values / 3000,  # Blue
+], axis=-1)
+rgb = np.clip(rgb, 0, 1)
+
+plt.figure(figsize=(12, 10))
+plt.imshow(rgb)
+plt.title("True Color Composite")
+plt.axis("off")
+plt.show()
+```
+
+### Temporal Analysis
+
+Analyze change over time:
+
+```python
+import pandas as pd
+
+# Build collection spanning multiple months
+collection = rasteret.build_from_stac(
+    name="temporal-study",
+    stac_api="https://earth-search.aws.element84.com/v1",
+    collection="sentinel-2-l2a",
+    bbox=(77.55, 13.01, 77.58, 13.08),
+    date_range=("2024-01-01", "2024-06-30"),
+)
+
+# Load data for each month
+monthly_ndvi = []
+for month in pd.date_range("2024-01", "2024-06", freq="MS"):
+    start = month.strftime("%Y-%m-01")
+    end = (month + pd.DateOffset(months=1) - pd.DateOffset(days=1)).strftime("%Y-%m-%d")
+    
+    subset = collection.subset(date_range=(start, end))
+    if len(subset) == 0:
+        continue
+    
+    ds = subset.get_xarray(
+        geometries=(77.55, 13.01, 77.58, 13.08),
+        bands=["B08", "B04"],
+        cloud_cover_lt=20,
+    )
+    
+    ndvi = (ds["B08"] - ds["B04"]) / (ds["B08"] + ds["B04"])
+    monthly_ndvi.append({
+        "date": month,
+        "mean_ndvi": float(ndvi.mean()),
+        "std_ndvi": float(ndvi.std()),
+    })
+
+# Plot temporal trend
+df = pd.DataFrame(monthly_ndvi)
+plt.figure(figsize=(10, 6))
+plt.plot(df["date"], df["mean_ndvi"], marker="o")
+plt.fill_between(
+    df["date"],
+    df["mean_ndvi"] - df["std_ndvi"],
+    df["mean_ndvi"] + df["std_ndvi"],
+    alpha=0.3,
+)
+plt.xlabel("Date")
+plt.ylabel("NDVI")
+plt.title("Vegetation Index Over Time")
+plt.grid(True)
+plt.show()
+```
+
+## Advanced Features
+
+### Multi-Geometry Queries
+
+Load data for multiple polygons:
+
+```python
+import shapely
+
+# Define multiple study areas
+geometries = [
+    shapely.box(77.55, 13.01, 77.57, 13.03),  # Area 1
+    shapely.box(77.56, 13.04, 77.58, 13.06),  # Area 2
+]
+
+ds = collection.get_xarray(
+    geometries=geometries,
+    bands=["B04", "B03", "B02"],
+)
+# Returns union of all geometries
+```
+
+### Multi-CRS Collections
+
+Automatically reproject mixed-CRS data:
+
+```python
+# Collection spans multiple UTM zones
+collection = rasteret.load("global-dataset")
+print(f"CRS zones: {collection.epsg}")  # [32643, 32644]
+
+# Option 1: Auto-select most common CRS
+ds = collection.get_xarray(
+    geometries=(77.0, 13.0, 78.0, 14.0),
+    bands=["B04", "B03", "B02"],
+)
+# Uses most common CRS (majority scenes)
+
+# Option 2: Force specific target CRS
+ds = collection.get_xarray(
+    geometries=(77.0, 13.0, 78.0, 14.0),
+    bands=["B04", "B03", "B02"],
+    target_crs=32643,  # All data reprojected to this CRS
+)
+```
+
+### Filtering During Load
+
+Combine spatial query with filters:
+
+```python
+ds = collection.get_xarray(
+    geometries=(77.55, 13.01, 77.58, 13.08),
+    bands=["B04", "B03", "B02"],
+    cloud_cover_lt=10,        # Only low-cloud scenes
+    date_range=("2024-03-01", "2024-03-31"),
+)
+```
+
+### Export to NetCDF
+
+Save for later analysis:
+
+```python
+ds = collection.get_xarray(
+    geometries=(77.55, 13.01, 77.58, 13.08),
+    bands=["B04", "B03", "B02"],
+)
+
+# Save to NetCDF
+ds.to_netcdf("bangalore_rgb.nc")
+
+# Reload later
+import xarray as xr
+ds_reloaded = xr.open_dataset("bangalore_rgb.nc")
+```
+
+## Performance Optimization
+
+### Concurrent Requests
+
+Tune parallelism for your network:
+
+```python
+ds = collection.get_xarray(
+    geometries=(77.55, 13.01, 77.58, 13.08),
+    bands=["B04", "B03", "B02"],
+    max_concurrent=100,  # Default: 50
+)
+# Higher values improve throughput but increase memory
+```
+
+### Cloud Configuration
+
+For requester-pays or private buckets:
+
+```python
+from rasteret.cloud import CloudConfig
+
+cloud_config = CloudConfig(
+    requester_pays=True,
+    region="us-west-2",
+)
+
+ds = collection.get_xarray(
+    geometries=(77.55, 13.01, 77.58, 13.08),
+    bands=["B4", "B5"],
+    cloud_config=cloud_config,
+)
+```
+
+### Backend Selection
+
+Use native cloud storage clients:
+
+```python
+try:
+    from obstore.store import S3Store
+    backend = S3Store.from_url("s3://bucket/prefix")
+except ImportError:
+    backend = None
+
+ds = collection.get_xarray(
+    geometries=(77.55, 13.01, 77.58, 13.08),
+    bands=["B04", "B03", "B02"],
+    backend=backend,
+)
+```
+
+## API Reference
+
+### `Collection.get_xarray()`
+
+Defined in `source/src/rasteret/core/collection.py:1098`.
+
+**Signature:**
+```python
+def get_xarray(
+    self,
+    geometries: Any,
+    bands: list[str],
+    *,
+    max_concurrent: int = 50,
+    cloud_config: Any = None,
+    data_source: str | None = None,
+    backend: Any = None,
+    target_crs: int | None = None,
+    **filters: Any,
+) -> xr.Dataset
+```
+
+**Parameters:**
+- `geometries`: Bounding box tuple, Shapely geometry, GeoJSON dict, or Arrow array
+- `bands`: List of band codes (e.g., `["B04", "B03", "B02"]`)
+- `max_concurrent`: Maximum concurrent HTTP requests
+- `cloud_config`: Optional `CloudConfig` for authentication/URL rewriting
+- `data_source`: Override inferred data source
+- `backend`: Optional `StorageBackend` instance
+- `target_crs`: EPSG code for reprojection
+- `**filters`: Additional kwargs passed to `Collection.subset()`
+
+**Returns:**
+- `xarray.Dataset`: Multi-band array with spatial coordinates
+
+### Coordinate Reference System
+
+CRS information is stored in the `spatial_ref` coordinate:
+
+```python
+ds.spatial_ref.attrs["crs_wkt"]       # WKT2 string
+ds.spatial_ref.attrs["GeoTransform"]  # GDAL GeoTransform
+ds.spatial_ref.attrs["spatial_ref"]   # PROJ.4 string (if available)
+```
+
+## Examples
+
+See the complete example at `source/examples/landsat_xarray.py:1` for a full Landsat workflow.
+
+## Common Patterns
+
+### Masking by Quality Band
+
+Use scene quality layers:
+
+```python
+# Load data + quality band
+ds = collection.get_xarray(
+    geometries=(77.55, 13.01, 77.58, 13.08),
+    bands=["B04", "B03", "B02", "SCL"],  # Scene Classification Layer
+)
+
+# Mask clouds (SCL values 8, 9, 10)
+import xarray as xr
+cloud_mask = xr.where(
+    (ds["SCL"] == 8) | (ds["SCL"] == 9) | (ds["SCL"] == 10),
+    True,
+    False,
+)
+
+# Apply mask to all bands
+masked_ds = ds[["B04", "B03", "B02"]].where(~cloud_mask)
+```
+
+### Resampling to Common Grid
+
+Align different resolution bands:
+
+```python
+# Load 10m and 20m bands
+ds = collection.get_xarray(
+    geometries=(77.55, 13.01, 77.58, 13.08),
+    bands=["B04", "B05"],  # 10m, 20m
+)
+
+# Resample B05 to B04 grid
+ds["B05_resampled"] = ds["B05"].interp_like(ds["B04"])
+```
+
+## Troubleshooting
+
+### Empty Dataset
+
+Error: No data returned from `get_xarray()`
+
+**Solution:** Check collection coverage:
+```python
+print(collection.bounds)  # Should overlap with geometries
+print(len(collection))    # Should be > 0
+```
+
+### CRS Mismatch
+
+Warning: `Collection spans multiple CRS zones`
+
+**Solution:** Specify `target_crs`:
+```python
+ds = collection.get_xarray(
+    geometries=(77.55, 13.01, 77.58, 13.08),
+    bands=["B04", "B03", "B02"],
+    target_crs=32643,
+)
+```
+
+### Memory Issues
+
+Error: Out of memory loading large regions
+
+**Solution:** Load smaller spatial extents or fewer bands:
+```python
+# Split into smaller tiles
+for x in range(77, 78, 0.1):
+    for y in range(13, 14, 0.1):
+        bbox = (x, y, x + 0.1, y + 0.1)
+        ds = collection.get_xarray(geometries=bbox, bands=["B04"])
+        # Process tile
+```
+
+## Related Resources
+
+- [xarray Documentation](https://docs.xarray.dev/)
+- [Data Analysis Guide](/guides/data-analysis)
+- [Example: landsat_xarray.py](https://github.com/terrafloww/rasteret/blob/main/examples/landsat_xarray.py)

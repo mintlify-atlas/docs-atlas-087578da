@@ -1,0 +1,233 @@
+---
+title: BandRegistry
+description: Extensible registry for collection band mappings
+---
+
+## Class Definition
+
+```python
+from rasteret import BandRegistry
+```
+
+Registry of collection ID to band-name mappings. Built-in collections (Sentinel-2, Landsat) are pre-registered. Users can register custom collections at any time.
+
+## Class Methods
+
+### register()
+
+```python
+BandRegistry.register(collection_id: str, band_map: dict[str, str]) -> None
+```
+
+Register a band mapping for a collection.
+
+<ParamField path="collection_id" type="str" required>
+  Collection identifier (e.g. `"my-collection"`).
+</ParamField>
+
+<ParamField path="band_map" type="dict[str, str]" required>
+  Mapping of band codes to band names (e.g. `{"B1": "red", "B2": "green"}`).
+</ParamField>
+
+### get()
+
+```python
+BandRegistry.get(
+    collection_id: str,
+    default: dict[str, str] | None = None
+) -> dict[str, str]
+```
+
+Look up band mapping for a collection ID.
+
+<ParamField path="collection_id" type="str" required>
+  Collection identifier.
+</ParamField>
+
+<ParamField path="default" type="dict[str, str] | None" default="None">
+  Default value to return if collection ID is not found.
+</ParamField>
+
+<ResponseField name="band_map" type="dict[str, str]">
+  The registered band mapping, or the default value if not found.
+</ResponseField>
+
+### list_registered()
+
+```python
+BandRegistry.list_registered() -> list[str]
+```
+
+Return all registered data-source IDs.
+
+<ResponseField name="collection_ids" type="list[str]">
+  List of registered collection identifiers.
+</ResponseField>
+
+## Examples
+
+### Register Custom Bands
+
+```python
+from rasteret import BandRegistry
+
+# Register band mapping for a custom collection
+BandRegistry.register(
+    "my-collection",
+    {
+        "B1": "red",
+        "B2": "green",
+        "B3": "blue",
+        "B4": "nir"
+    }
+)
+```
+
+### Register Multi-Band Asset
+
+```python
+# For a collection with multi-band GeoTIFFs
+BandRegistry.register(
+    "drone-imagery",
+    {
+        "1": "red",
+        "2": "green",
+        "3": "blue",
+        "4": "nir",
+        "5": "rededge"
+    }
+)
+```
+
+### Lookup Bands
+
+```python
+# Get band mapping for a collection
+sentinel_bands = BandRegistry.get("sentinel-2-l2a")
+print(sentinel_bands)
+# {
+#     "B01": "coastal",
+#     "B02": "blue",
+#     "B03": "green",
+#     "B04": "red",
+#     ...
+# }
+
+# With default fallback
+custom_bands = BandRegistry.get(
+    "unknown-collection",
+    default={"B1": "band1"}
+)
+```
+
+### List All Collections
+
+```python
+# See all registered collections
+collections = BandRegistry.list_registered()
+print(collections)
+# ['sentinel-2-l2a', 'landsat-c2-l2', 'my-collection']
+```
+
+### Using with build_from_stac
+
+```python
+import rasteret
+
+# Register bands before building
+BandRegistry.register(
+    "my-stac-collection",
+    {
+        "red": "B04",
+        "green": "B03",
+        "blue": "B02"
+    }
+)
+
+# Band map is used during ingestion
+collection = rasteret.build_from_stac(
+    name="test",
+    stac_api="https://api.example.com",
+    collection="my-stac-collection",
+    data_source="my-stac-collection",
+    bbox=bbox,
+    date_range=date_range
+)
+
+# Access registered bands
+data = collection.get_numpy(
+    geometries=bbox,
+    bands=["red", "green", "blue"]
+)
+```
+
+### Override Built-in Mapping
+
+```python
+# Override Sentinel-2 bands with custom names
+BandRegistry.register(
+    "sentinel-2-l2a",
+    {
+        "B02": "blue_10m",
+        "B03": "green_10m",
+        "B04": "red_10m",
+        "B08": "nir_10m"
+    }
+)
+```
+
+## Built-in Mappings
+
+### Sentinel-2 L2A
+
+```python
+{
+    "B01": "coastal",
+    "B02": "blue",
+    "B03": "green",
+    "B04": "red",
+    "B05": "rededge1",
+    "B06": "rededge2",
+    "B07": "rededge3",
+    "B08": "nir",
+    "B8A": "nir08",
+    "B09": "nir09",
+    "B11": "swir16",
+    "B12": "swir22",
+    "SCL": "scl"
+}
+```
+
+### Landsat Collection 2 Level-2
+
+```python
+{
+    "B1": "coastal",
+    "B2": "blue",
+    "B3": "green",
+    "B4": "red",
+    "B5": "nir08",
+    "B6": "swir16",
+    "B7": "swir22",
+    "qa_aerosol": "qa_aerosol",
+    "qa_pixel": "qa_pixel",
+    "qa_radsat": "qa_radsat"
+}
+```
+
+## Integration Points
+
+The BandRegistry is used by:
+
+- **build_from_stac()**: Maps STAC asset keys to band codes during ingestion
+- **build_from_table()**: Maps band codes to asset URLs when constructing the assets column
+- **Collection methods**: Validates band codes in `get_numpy()`, `get_xarray()`, etc.
+
+## Notes
+
+- Band mappings are stored in a class-level registry
+- Built-in collections are pre-registered at import time
+- Collection IDs are case-sensitive
+- You can override built-in mappings by re-registering
+- Band codes are arbitrary strings (e.g. "B04", "red", "band_4")
+- Used primarily for STAC asset key resolution during ingestion

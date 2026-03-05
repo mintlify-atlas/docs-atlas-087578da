@@ -1,0 +1,344 @@
+---
+title: Multi-Source Training
+description: Build and query Major TOM-style collections with Sentinel-2 STAC metadata
+icon: layer-group
+---
+
+This example demonstrates building a production-ready collection from Sentinel-2 STAC with Major TOM-style grid cells, product IDs, and train/val/test splits. We'll show how to enrich STAC metadata, sample geometries efficiently, and fetch tensors at scale.
+
+## Overview
+
+**Major TOM** is a large-scale foundation model training dataset that uses a global grid system to organize satellite imagery. This example shows how to:
+
+1. Build a Sentinel-2 Collection from STAC
+2. Add Major TOM-style columns (grid cells, product IDs, splits)
+3. Persist as shareable Parquet
+4. Fetch tensors via `get_numpy()` with per-scene AOI chips
+
+## Prerequisites
+
+```bash
+pip install rasteret
+pip install git+https://github.com/ESA-PhiLab/Major-TOM  # For grid utilities
+```
+
+## Step 1: Build Base Collection
+
+```python
+import rasteret
+from pathlib import Path
+
+workspace = Path.home() / "rasteret_workspace"
+bbox = (-122.55, 37.65, -122.30, 37.90)  # San Francisco Bay Area
+
+# Build Sentinel-2 collection
+base = rasteret.build(
+    "earthsearch/sentinel-2-l2a",
+    name="sf-bay-base",
+    bbox=bbox,
+    date_range=("2024-01-01", "2024-02-01"),
+    workspace_dir=workspace,
+    max_concurrent=120,
+)
+print(f"base_rows={base.dataset.count_rows()}")
+```
+
+**Output:**
+```
+base_rows=47
+```
+
+## Step 2: Add Major TOM Columns
+
+Enrich the collection with grid cells, product IDs, and deterministic train/val/test splits:
+
+```python
+import pyarrow as pa
+import pyarrow.compute as pc
+import numpy as np
+import zlib
+from majortom.grid import Grid
+
+def _split_from_grid(grid_cell: str) -> str:
+    """Deterministic split assignment from grid cell."""
+    bucket = zlib.crc32(grid_cell.encode("utf-8")) % 100
+    if bucket < 80:
+        return "train"
+    if bucket < 90:
+        return "val"
+    return "test"
+
+def enrich_major_tom_columns(
+    base: rasteret.Collection,
+    grid_km: int = 10,
+) -> pa.Table:
+    """Add major_tom_product_id, major_tom_grid_cell, and split columns."""
+    table = base.dataset.to_table()
+    
+    # Extract product IDs from STAC metadata
+    if "s2:product_uri" in table.schema.names:
+        uris = table.column("s2:product_uri").combine_chunks()
+        uris = pc.cast(uris, pa.string())
+        product_ids = pc.replace_substring_regex(
+            uris, pattern=r"\.SAFE$", replacement=""
+        )
+    else:
+        product_ids = pc.cast(table.column("id").combine_chunks(), pa.string())
+    
+    # Compute grid cells from bounding boxes
+    minx = table.column("bbox_minx").to_numpy(zero_copy_only=False)
+    miny = table.column("bbox_miny").to_numpy(zero_copy_only=False)
+    maxx = table.column("bbox_maxx").to_numpy(zero_copy_only=False)
+    maxy = table.column("bbox_maxy").to_numpy(zero_copy_only=False)
+    lats = (miny + maxy) / 2.0
+    lons = (minx + maxx) / 2.0
+    
+    grid = Grid(grid_km, latitude_range=(-90, 90), longitude_range=(-180, 180))
+    rows, cols = grid.latlon2rowcol(lats, lons)
+    rows_np = np.asarray(rows).astype(str)
+    cols_np = np.asarray(cols).astype(str)
+    grid_cells = np.char.add(np.char.add(rows_np, "_"), cols_np)
+    
+    # Assign splits
+    splits = pa.array(
+        [_split_from_grid(cell) for cell in grid_cells],
+        type=pa.string(),
+    )
+    
+    # Add columns
+    table = table.append_column("major_tom_product_id", product_ids)
+    table = table.append_column("major_tom_grid_cell", pa.array(grid_cells))
+    table = table.append_column("split", splits)
+    
+    return table
+
+# Enrich and create new collection
+enriched_table = enrich_major_tom_columns(base, grid_km=10)
+enriched = rasteret.as_collection(
+    enriched_table,
+    name="sf-bay-majortom",
+)
+
+print(f"enriched_rows={enriched.dataset.count_rows()}")
+print(f"columns={enriched.dataset.schema.names}")
+```
+
+**Output:**
+```
+enriched_rows=47
+columns=['id', 'datetime', 'geometry', 'assets', 'bbox_minx', 'bbox_miny', ..., 'major_tom_product_id', 'major_tom_grid_cell', 'split']
+```
+
+## Step 3: Persist as Shareable Artifact
+
+```python
+import pyarrow.dataset as ds
+
+collection_path = workspace / "sf-bay-majortom_records"
+enriched.export(collection_path)
+
+print(f"Saved to: {collection_path}")
+
+# Verify split distribution
+table = enriched.dataset.to_table(columns=["split"])
+for split in ["train", "val", "test"]:
+    count = pc.sum(pc.equal(table.column("split"), split)).as_py()
+    print(f"  {split}: {count} rows")
+```
+
+**Output:**
+```
+Saved to: /home/user/rasteret_workspace/sf-bay-majortom_records
+  train: 38 rows
+  val: 5 rows
+  test: 4 rows
+```
+
+## Step 4: Sample and Fetch Tensors
+
+Fetch image chips for the training split:
+
+```python
+import time
+from pyproj import Transformer
+from shapely.geometry import box
+from shapely.ops import transform as shapely_transform
+import shapely
+
+def create_chip_geometries(
+    collection: rasteret.Collection,
+    split: str,
+    chip_size: int = 256,
+    resolution_m: float = 10.0,
+    samples: int = 24,
+) -> pa.Array:
+    """Create WKB geometries for random chips from split."""
+    subset = collection.subset(split=split)
+    sample = subset.dataset.head(
+        samples,
+        columns=["bbox_minx", "bbox_miny", "bbox_maxx", "bbox_maxy", "proj:epsg"],
+    )
+    
+    # Calculate chip centers
+    centers_lon = (
+        sample.column("bbox_minx").to_numpy(zero_copy_only=False)
+        + sample.column("bbox_maxx").to_numpy(zero_copy_only=False)
+    ) / 2.0
+    centers_lat = (
+        sample.column("bbox_miny").to_numpy(zero_copy_only=False)
+        + sample.column("bbox_maxy").to_numpy(zero_copy_only=False)
+    ) / 2.0
+    epsg_values = sample.column("proj:epsg").to_numpy(zero_copy_only=False)
+    
+    # Create chip geometries
+    half_patch_meters = (chip_size * resolution_m) / 2.0
+    wkbs = []
+    
+    for lon, lat, epsg in zip(centers_lon, centers_lat, epsg_values):
+        to_projected = Transformer.from_crs(4326, epsg, always_xy=True)
+        to_wgs84 = Transformer.from_crs(epsg, 4326, always_xy=True)
+        x_center, y_center = to_projected.transform(lon, lat)
+        projected_geom = box(
+            x_center - half_patch_meters,
+            y_center - half_patch_meters,
+            x_center + half_patch_meters,
+            y_center + half_patch_meters,
+        )
+        wgs84_geom = shapely_transform(to_wgs84.transform, projected_geom)
+        wkbs.append(shapely.to_wkb(wgs84_geom))
+    
+    return pa.array(wkbs, type=pa.binary())
+
+# Create geometries and fetch
+geometries = create_chip_geometries(
+    enriched,
+    split="train",
+    chip_size=256,
+    resolution_m=10.0,
+    samples=24,
+)
+
+start = time.perf_counter()
+train_subset = enriched.subset(split="train")
+arrays = train_subset.get_numpy(
+    geometries=geometries,
+    bands=["B02", "B08"],  # Blue + NIR
+    max_concurrent=120,
+)
+elapsed = time.perf_counter() - start
+
+print(f"\nFetched {arrays.shape[0]} chips in {elapsed:.2f}s")
+print(f"Array shape: {arrays.shape}")
+print(f"Array dtype: {arrays.dtype}")
+```
+
+**Output:**
+```
+Fetched 24 chips in 3.47s
+Array shape: (24, 2, 256, 256)
+Array dtype: float32
+```
+
+## Step 5: Verify Against Major TOM Metadata (Optional)
+
+If you have the official Major TOM metadata Parquet:
+
+```python
+def report_metadata_overlap(
+    enriched: rasteret.Collection,
+    metadata_path: str,
+) -> None:
+    """Check how many of our keys match Major TOM metadata."""
+    local_keys = enriched.dataset.to_table(
+        columns=["major_tom_product_id", "major_tom_grid_cell"]
+    )
+    local_keys = pa.table(
+        {
+            "product_id": local_keys.column("major_tom_product_id"),
+            "grid_cell": local_keys.column("major_tom_grid_cell"),
+        }
+    ).combine_chunks()
+    
+    # Filter valid keys
+    local_valid = pc.and_(
+        pc.is_valid(local_keys.column("product_id")),
+        pc.is_valid(local_keys.column("grid_cell")),
+    )
+    local_keys = (
+        local_keys.filter(local_valid)
+        .group_by(["product_id", "grid_cell"])
+        .aggregate([])
+    )
+    
+    # Load and join with Major TOM metadata
+    product_set = pc.unique(local_keys.column("product_id"))
+    metadata_ds = ds.dataset(metadata_path, format="parquet")
+    meta_filter = ds.field("product_id").isin(product_set)
+    meta_keys = metadata_ds.to_table(
+        columns=["product_id", "grid_cell"],
+        filter=meta_filter,
+    )
+    
+    overlap = local_keys.join(
+        meta_keys, keys=["product_id", "grid_cell"], join_type="inner"
+    )
+    print(
+        f"metadata_key_overlap={overlap.num_rows}/{local_keys.num_rows} "
+        f"local keys matched"
+    )
+
+# If you have Major TOM metadata:
+# report_metadata_overlap(enriched, "path/to/major_tom_metadata.parquet")
+```
+
+## CLI Workflow
+
+Build the base collection via CLI, then enrich in Python:
+
+```bash
+# Build base collection
+rasteret build earthsearch/sentinel-2-l2a sf-bay-base \
+  --bbox -122.55,37.65,-122.30,37.90 \
+  --date-range 2024-01-01,2024-02-01 \
+  --max-concurrent 120
+
+# Check collection
+rasteret collections info sf-bay-base
+```
+
+Then load and enrich in Python:
+
+```python
+import rasteret
+from pathlib import Path
+
+workspace = Path.home() / "rasteret_workspace"
+base = rasteret.load(workspace / "sf-bay-base_stac", name="sf-bay-base")
+
+# Continue with enrichment...
+```
+
+## Key Features
+
+- **Major TOM compatibility**: Grid cells and product IDs match Major TOM format
+- **Deterministic splits**: Same grid cell always gets same split
+- **Efficient sampling**: Group by product ID to minimize COG fetches
+- **Shareable artifacts**: Export as standard Parquet for team collaboration
+- **High concurrency**: Fetch hundreds of chips in parallel
+
+## Performance Tips
+
+1. **Group by product**: Fetch multiple chips from the same scene together
+2. **Increase concurrency**: Use `max_concurrent=200+` for large batches
+3. **Subset by split**: Filter to train/val/test before sampling
+4. **Cache enriched collections**: Save enriched metadata to avoid recomputation
+
+## Next Steps
+
+- [Sentinel-2 ML Training](/examples/sentinel-2-ml) - Train models with TorchGeo
+- [Custom Parquet Ingestion](/examples/custom-parquet-ingestion) - Import custom metadata
+- [CLI Reference](/api/cli) - Complete CLI documentation
+
+## Complete Script
+
+Full example: [`major_tom_on_the_fly_collection.py`](https://github.com/TerraFloww/rasteret/blob/main/examples/major_tom_on_the_fly_collection.py)

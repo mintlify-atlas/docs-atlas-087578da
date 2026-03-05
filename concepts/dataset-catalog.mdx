@@ -1,0 +1,439 @@
+---
+title: Dataset Catalog
+description: Built-in registry of 12+ geospatial datasets ready to use
+---
+
+## Overview
+
+The **Dataset Catalog** is Rasteret's registry of pre-configured datasets. Each entry is a `DatasetDescriptor` that captures:
+
+- Identity (id, name, description)
+- Access method (STAC API or GeoParquet URI)
+- Band mapping (band codes → STAC asset keys)
+- Coverage metadata (spatial, temporal, licensing)
+
+You pick a dataset ID, pass it to `rasteret.build()`, and Rasteret handles the rest.
+
+## List Available Datasets
+
+### CLI
+
+```bash
+$ rasteret datasets list
+ID                          Name                                       Coverage       License              Auth
+aef/v1-annual               AlphaEarth Foundation Embeddings (Annual)  global         CC-BY-4.0            none
+earthsearch/sentinel-2-l2a  Sentinel-2 Level-2A                        global         proprietary(free)    none
+earthsearch/landsat-c2-l2   Landsat Collection 2 Level-2               global         proprietary(free)    required
+earthsearch/naip            NAIP                                       north-america  proprietary(free)    required
+earthsearch/cop-dem-glo-30  Copernicus DEM 30m                         global         proprietary(free)    none
+earthsearch/cop-dem-glo-90  Copernicus DEM 90m                         global         proprietary(free)    none
+pc/sentinel-2-l2a           Sentinel-2 Level-2A (Planetary Computer)   global         proprietary(free)    required
+pc/io-lulc-annual-v02       ESRI 10m Land Use/Land Cover               global         CC-BY-4.0            required
+pc/alos-dem                 ALOS World 3D 30m DEM                      global         proprietary(free)    required
+pc/nasadem                  NASADEM                                    global         proprietary(free)    required
+pc/esa-worldcover           ESA WorldCover                             global         CC-BY-4.0            required
+pc/usda-cdl                 USDA Cropland Data Layer                   conus          proprietary(free)    required
+```
+
+### Python
+
+```python
+import rasteret
+
+# List all datasets
+for desc in rasteret.DatasetRegistry.list():
+    print(f"{desc.id:30} {desc.name}")
+
+# Search by keyword
+sentinel = rasteret.DatasetRegistry.search("sentinel")
+for desc in sentinel:
+    print(desc.id, desc.description)
+
+# Get specific descriptor
+desc = rasteret.DatasetRegistry.get("earthsearch/sentinel-2-l2a")
+print(desc.band_map)  # {'B01': 'coastal', 'B02': 'blue', ...}
+```
+
+See `src/rasteret/catalog.py:188-266` for the DatasetRegistry implementation.
+
+## Built-In Datasets
+
+### Sentinel-2 Level-2A
+
+**Free, no auth** (via Element84 Earth Search):
+
+```python
+collection = rasteret.build(
+    "earthsearch/sentinel-2-l2a",
+    name="s2_training",
+    bbox=(77.5, 12.9, 77.7, 13.1),
+    date_range=("2024-01-01", "2024-06-30"),
+)
+```
+
+- **Bands**: 13 (B01-B12, SCL)
+- **Resolution**: 10m (visible/NIR), 20m (red edge/SWIR), 60m (coastal/cirrus)
+- **Coverage**: Global, 2015-present
+- **License**: Proprietary (free for all uses)
+
+Descriptor at `src/rasteret/catalog.py:412-443`.
+
+### Landsat Collection 2 Level-2
+
+**Requester-pays** (AWS charges apply):
+
+```python
+collection = rasteret.build(
+    "earthsearch/landsat-c2-l2",
+    name="landsat_training",
+    bbox=(77.5, 12.9, 77.7, 13.1),
+    date_range=("2024-01-01", "2024-06-30"),
+)
+```
+
+- **Bands**: 10 (B1-B7, QA bands)
+- **Resolution**: 30m (optical), 100m (thermal)
+- **Coverage**: Global, 1982-present
+- **License**: Proprietary (free for all uses)
+- **Auth**: AWS credentials required (`aws configure` or environment variables)
+
+Descriptor at `src/rasteret/catalog.py:445-482`.
+
+<Warning>
+Requester-pays buckets charge you for S3 requests. Configure AWS credentials via `aws configure` or set `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`.
+</Warning>
+
+### NAIP (Aerial Imagery)
+
+**Requester-pays** (1m resolution, CONUS only):
+
+```python
+collection = rasteret.build(
+    "earthsearch/naip",
+    name="naip_california",
+    bbox=(-122.5, 37.7, -122.3, 37.9),
+    date_range=("2020-01-01", "2022-12-31"),
+)
+```
+
+- **Bands**: 4 (RGB + NIR, single multi-band COG)
+- **Resolution**: 1m
+- **Coverage**: Continental US, 2010-2023
+- **License**: Proprietary (free, USDA policy)
+
+Descriptor at `src/rasteret/catalog.py:484-509`.
+
+### AlphaEarth Foundation Embeddings
+
+**Free, no auth** (via Source Cooperative):
+
+```python
+collection = rasteret.build(
+    "aef/v1-annual",
+    name="aef_embeddings",
+    bbox=(11.3, -0.002, 11.5, 0.001),
+    date_range=("2023-01-01", "2023-12-31"),
+)
+```
+
+- **Bands**: 64 (int8 foundation model embeddings)
+- **Resolution**: 10m
+- **Coverage**: Global, 2018-2023
+- **License**: CC-BY-4.0
+- **Source**: GeoParquet index (no STAC API)
+
+Descriptor at `src/rasteret/catalog.py:686-720`.
+
+### Planetary Computer Datasets
+
+All require authentication (free but needs sign-up):
+
+```python
+# Install Azure extra
+# uv pip install "rasteret[azure]"
+
+from obstore.auth.planetary_computer import PlanetaryComputerCredentialProvider
+
+backend = rasteret.create_backend(
+    credential_provider=PlanetaryComputerCredentialProvider(
+        "https://planetarycomputer.microsoft.com/api/stac/v1"
+    )
+)
+
+collection = rasteret.build(
+    "pc/sentinel-2-l2a",
+    name="pc_s2",
+    bbox=(77.5, 12.9, 77.7, 13.1),
+    date_range=("2024-01-01", "2024-06-30"),
+    backend=backend,
+)
+```
+
+Available datasets:
+- `pc/sentinel-2-l2a` — Sentinel-2 (Azure mirror)
+- `pc/io-lulc-annual-v02` — ESRI 10m Land Cover
+- `pc/alos-dem` — ALOS World 3D 30m DEM
+- `pc/nasadem` — NASADEM 30m
+- `pc/esa-worldcover` — ESA WorldCover 10m
+- `pc/usda-cdl` — USDA Cropland Data Layer (CONUS)
+
+See `src/rasteret/catalog.py:551-682` for descriptors.
+
+## DatasetDescriptor Structure
+
+Each entry is a `DatasetDescriptor` dataclass:
+
+```python
+from rasteret.catalog import DatasetDescriptor
+
+desc = DatasetDescriptor(
+    id="earthsearch/sentinel-2-l2a",
+    name="Sentinel-2 Level-2A",
+    description="Multi-spectral optical imagery, 10-60m, global",
+    
+    # Access method (STAC API)
+    stac_api="https://earth-search.aws.element84.com/v1",
+    stac_collection="sentinel-2-l2a",
+    
+    # Band mapping: {band_code: STAC asset key}
+    band_map={
+        "B01": "coastal",
+        "B02": "blue",
+        "B03": "green",
+        "B04": "red",
+        "B08": "nir",
+        "B12": "swir22",
+        "SCL": "scl",
+    },
+    separate_files=True,  # Each band is a separate COG
+    
+    # Coverage metadata
+    spatial_coverage="global",
+    temporal_range=("2015-06-23", "present"),
+    
+    # Licensing
+    license="proprietary",
+    license_url="https://sentinel.esa.int/documents/...",
+    commercial_use=True,
+    
+    # Authentication
+    requires_auth=False,
+)
+```
+
+See `src/rasteret/catalog.py:50-185` for the full dataclass definition.
+
+## Add Your Own Datasets
+
+### Runtime Registration
+
+Register custom datasets in your code:
+
+```python
+from rasteret.catalog import DatasetDescriptor
+import rasteret
+
+rasteret.register(DatasetDescriptor(
+    id="acme/field-survey-2024",
+    name="ACME Field Survey",
+    stac_api="https://acme.example.com/stac/v1",
+    stac_collection="field-survey-2024",
+    band_map={"RGB": "image", "NIR": "image"},
+    band_index_map={"RGB": 0, "NIR": 1},  # Multi-band COG
+    separate_files=False,
+    license="CC-BY-4.0",
+    license_url="https://acme.example.com/license",
+    spatial_coverage="regional",
+))
+
+# Now available via build()
+collection = rasteret.build(
+    "acme/field-survey-2024",
+    name="acme_training",
+    bbox=(...),
+    date_range=(...),
+)
+```
+
+### Contribute to Built-Ins
+
+Add datasets to `src/rasteret/catalog.py` and open a PR:
+
+1. **Find the dataset's STAC API or GeoParquet index**
+2. **Write a descriptor** (~20 lines):
+   ```python
+   DatasetRegistry.register(
+       DatasetDescriptor(
+           id="provider/dataset-name",
+           name="Human-Readable Name",
+           description="One-line summary",
+           stac_api="https://...",
+           stac_collection="collection-id",
+           band_map={"B1": "asset_key", ...},
+           separate_files=True,
+           spatial_coverage="global",
+           temporal_range=("2020-01-01", "present"),
+           license="CC-BY-4.0",
+           license_url="https://...",
+           example_bbox=(-122.5, 37.7, -122.3, 37.9),
+           example_date_range=("2024-01-01", "2024-06-01"),
+       )
+   )
+   ```
+3. **Test it** with `rasteret.build()` using `example_bbox` and `example_date_range`
+4. **Submit PR** — every Rasteret user sees it in `rasteret datasets list` on next release
+
+See the [Dataset Catalog How-To](/concepts/dataset-catalog) for prerequisites and best practices.
+
+## Access Patterns
+
+### STAC-Backed Datasets
+
+Most datasets use a STAC API:
+
+```python
+desc = DatasetDescriptor(
+    id="provider/dataset",
+    stac_api="https://stac.example.com/v1",
+    stac_collection="collection-id",
+    band_map={"B04": "red", "B08": "nir"},
+)
+```
+
+**Build process**:
+1. Query STAC API with bbox and date_range
+2. Fetch COG headers for matching scenes
+3. Write Parquet index to `~/rasteret_workspace/{name}_stac/`
+
+### GeoParquet-Backed Datasets
+
+Some datasets provide a GeoParquet index (e.g. AlphaEarth Foundation):
+
+```python
+desc = DatasetDescriptor(
+    id="provider/dataset",
+    geoparquet_uri="s3://bucket/index.parquet",
+    column_map={"fid": "id", "geom": "geometry"},
+    href_column="path",
+    band_index_map={"B01": 0, "B02": 1},
+)
+```
+
+**Build process**:
+1. Load GeoParquet with PyArrow
+2. Apply column_map to normalize schema
+3. Construct `assets` struct from `href_column` + `band_index_map`
+4. Optionally enrich with COG headers (`enrich_cog=True`)
+5. Write to workspace
+
+See `src/rasteret/__init__.py:370-457` for the GeoParquet build path.
+
+## Cloud Configuration
+
+Datasets can specify cloud provider settings:
+
+```python
+desc = DatasetDescriptor(
+    id="earthsearch/landsat-c2-l2",
+    cloud_config={
+        "provider": "aws",
+        "requester_pays": True,
+        "region": "us-west-2",
+        "url_patterns": {
+            "https://landsatlook.usgs.gov/data/": "s3://usgs-landsat/"
+        },
+    },
+)
+```
+
+Rasteret auto-creates a `CloudConfig` and registers it keyed by dataset ID. This enables:
+- Requester-pays S3 requests
+- URL rewriting (HTTPS → S3 for faster access)
+- Per-dataset authentication
+
+See `src/rasteret/catalog.py:217-229` for the registration logic.
+
+## Licensing and Commercial Use
+
+Each descriptor includes licensing metadata:
+
+```python
+desc.license              # "CC-BY-4.0" or "proprietary"
+desc.license_url          # Link to full license text
+desc.commercial_use       # True/False
+```
+
+**Filter by commercial-use-allowed**:
+
+```python
+commercial_datasets = [
+    d for d in rasteret.DatasetRegistry.list()
+    if d.commercial_use
+]
+```
+
+<Note>
+Always review the license_url before using datasets commercially. The `commercial_use` flag is a convenience filter, not legal advice.
+</Note>
+
+## Local Datasets
+
+Register local Parquet collections to make them appear in the catalog:
+
+```python
+# Build a collection
+collection = rasteret.build_from_table(
+    "./my_data.parquet",
+    name="local_survey",
+    enrich_cog=True,
+)
+
+# Register it
+rasteret.register_local(
+    dataset_id="local/survey_2024",
+    path=collection.dataset.files[0],  # Path to Parquet
+    name="Field Survey 2024",
+    description="Drone imagery, 5cm resolution",
+    persist=True,  # Save to ~/.rasteret/datasets.local.json
+)
+
+# Now available via build()
+reloaded = rasteret.build("local/survey_2024", name="reload")
+```
+
+See `src/rasteret/__init__.py:513-588` for the `register_local()` implementation.
+
+## Advanced: Static STAC Catalogs
+
+For static STAC catalogs (no `/search` endpoint):
+
+```python
+desc = DatasetDescriptor(
+    id="provider/static-catalog",
+    stac_api="https://example.com/catalog.json",  # Root catalog URL
+    stac_collection=None,  # Traverse from root
+    static_catalog=True,
+    band_map={...},
+)
+```
+
+Rasteret uses `pystac.Catalog.from_file()` and client-side filtering.
+
+See `src/rasteret/catalog.py:122-126` for the `static_catalog` field.
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Build From STAC" href="/guides/building-collections" icon="satellite">
+    Use `build_from_stac()` for datasets not in the catalog
+  </Card>
+  <Card title="Build From Parquet" href="/guides/building-collections" icon="table">
+    Index GeoParquet files with `build_from_table()`
+  </Card>
+  <Card title="Custom Cloud Provider" href="/guides/cloud-authentication" icon="cloud">
+    Handle auth-required datasets (Planetary Computer, Earthdata)
+  </Card>
+  <Card title="Contribute a Dataset" href="/concepts/dataset-catalog" icon="code-pull-request">
+    Add your dataset to the built-in catalog
+  </Card>
+</CardGroup>

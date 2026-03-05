@@ -1,0 +1,245 @@
+---
+title: 'Collection'
+description: 'A collection of raster data with spatial and temporal indexing'
+---
+
+## Class Definition
+
+```python
+class Collection:
+    def __init__(
+        self,
+        dataset: ds.Dataset | None = None,
+        name: str = "",
+        description: str = "",
+        data_source: str = "",
+        start_date: datetime | None = None,
+        end_date: datetime | None = None,
+    )
+```
+
+## Description
+
+A collection of raster data with flexible initialization and efficient partitioned storage. Collections can be created from local partitioned datasets or single Arrow tables.
+
+Collections provide spatial and temporal filtering, pixel data extraction, and integration with popular geospatial libraries (xarray, GeoPandas, TorchGeo).
+
+## Attributes
+
+<ResponseField name="dataset" type="pyarrow.dataset.Dataset | None">
+  Backing Arrow dataset containing the raster metadata.
+</ResponseField>
+
+<ResponseField name="name" type="str">
+  Human-readable collection name.
+</ResponseField>
+
+<ResponseField name="description" type="str">
+  Free-text description.
+</ResponseField>
+
+<ResponseField name="data_source" type="str">
+  Data source identifier (e.g., `"sentinel-2-l2a"`).
+</ResponseField>
+
+<ResponseField name="start_date" type="datetime | None">
+  Collection temporal start.
+</ResponseField>
+
+<ResponseField name="end_date" type="datetime | None">
+  Collection temporal end.
+</ResponseField>
+
+## Methods
+
+### from_parquet()
+
+```python
+@classmethod
+def from_parquet(
+    cls,
+    path: str | Path,
+    name: str = "",
+) -> Collection
+```
+
+Load a Collection from any Parquet file or directory. Accepts local paths and cloud URIs (`s3://`, `gs://`). Validates that core contract columns are present.
+
+<ParamField path="path" type="str | Path" required>
+  Path to the Parquet file or dataset directory.
+</ParamField>
+
+<ParamField path="name" type="str" default="">
+  Optional name override.
+</ParamField>
+
+### subset()
+
+```python
+def subset(
+    self,
+    *,
+    cloud_cover_lt: float | None = None,
+    date_range: tuple[str, str] | None = None,
+    bbox: tuple[float, float, float, float] | None = None,
+    geometries: Any = None,
+    split: str | Sequence[str] | None = None,
+    split_column: str = "split",
+) -> Collection
+```
+
+Return a filtered view of this Collection. All provided criteria are combined with AND.
+
+<ParamField path="cloud_cover_lt" type="float">
+  Keep records with `eo:cloud_cover` below this value (0-100).
+</ParamField>
+
+<ParamField path="date_range" type="tuple[str, str]">
+  `(start, end)` ISO date strings for temporal filtering.
+</ParamField>
+
+<ParamField path="bbox" type="tuple[float, float, float, float]">
+  `(minx, miny, maxx, maxy)` bounding box filter.
+</ParamField>
+
+<ParamField path="geometries" type="Any">
+  Spatial filter; records whose bbox overlaps any geometry are kept. Accepts bbox tuples, Arrow arrays, Shapely objects, raw WKB bytes, or GeoJSON dicts.
+</ParamField>
+
+<ParamField path="split" type="str | Sequence[str]">
+  Keep only rows matching the given split value(s).
+</ParamField>
+
+<ParamField path="split_column" type="str" default="split">
+  Column name holding split labels.
+</ParamField>
+
+### get_xarray()
+
+```python
+def get_xarray(
+    self,
+    geometries: Any,
+    bands: list[str],
+    resolution: float,
+    *,
+    resampling: str = "bilinear",
+    backend: Any = None,
+) -> xr.Dataset
+```
+
+Extract pixel data as an xarray Dataset.
+
+<ParamField path="geometries" type="Any" required>
+  Target geometries (bbox tuple, Shapely, WKB, GeoJSON, or Arrow array).
+</ParamField>
+
+<ParamField path="bands" type="list[str]" required>
+  List of band codes to extract (e.g., `["B04", "B03", "B02"]`).
+</ParamField>
+
+<ParamField path="resolution" type="float" required>
+  Target spatial resolution in meters.
+</ParamField>
+
+<ParamField path="resampling" type="str" default="bilinear">
+  Resampling method: `"bilinear"`, `"nearest"`, `"cubic"`, etc.
+</ParamField>
+
+<ParamField path="backend" type="StorageBackend">
+  I/O backend for authenticated cloud reads.
+</ParamField>
+
+### get_numpy()
+
+```python
+def get_numpy(
+    self,
+    geometries: Any,
+    bands: list[str],
+    resolution: float,
+    *,
+    resampling: str = "bilinear",
+    backend: Any = None,
+) -> list[np.ndarray]
+```
+
+Extract pixel data as numpy arrays.
+
+### get_gdf()
+
+```python
+def get_gdf(
+    self,
+    *,
+    columns: list[str] | None = None,
+    geometries: Any = None,
+) -> gpd.GeoDataFrame
+```
+
+Export collection metadata as a GeoDataFrame.
+
+### to_torchgeo_dataset()
+
+```python
+def to_torchgeo_dataset(
+    self,
+    *,
+    backend: Any = None,
+) -> RasteretGeoDataset
+```
+
+Convert to a TorchGeo-compatible GeoDataset for training.
+
+### export()
+
+```python
+def export(
+    self,
+    path: str | Path,
+    *,
+    format: str = "parquet",
+    partitioning: Any = None,
+) -> None
+```
+
+Persist the collection to disk.
+
+## Usage Example
+
+```python
+import rasteret
+
+# Build a collection
+collection = rasteret.build(
+    "earthsearch/sentinel-2-l2a",
+    name="bay-area",
+    bbox=(-122.5, 37.5, -122.0, 38.0),
+    date_range=("2024-01-01", "2024-03-31"),
+)
+
+print(f"{collection.name}: {len(collection)} scenes")
+print(f"Date range: {collection.start_date} to {collection.end_date}")
+
+# Filter for clear scenes
+filtered = collection.subset(
+    cloud_cover_lt=10,
+    date_range=("2024-01-15", "2024-01-31"),
+)
+
+# Extract pixels
+ds = filtered.get_xarray(
+    geometries=aoi_polygon,
+    bands=["B04", "B03", "B02"],
+    resolution=10,
+)
+
+# Export for sharing
+filtered.export("/path/to/export/filtered.parquet")
+```
+
+## Related Functions
+
+- [build()](/api/build) - Build a Collection from a registered dataset
+- [load()](/api/load) - Load a persisted Collection
+- [as_collection()](/api/as-collection) - Wrap an in-memory Arrow object

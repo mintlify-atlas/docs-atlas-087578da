@@ -1,0 +1,522 @@
+---
+title: CLI Reference
+description: Complete guide to Rasteret command-line tools
+icon: terminal
+---
+
+The Rasteret CLI provides commands for managing datasets and collections, building STAC-backed caches, and working with local Parquet data.
+
+## Installation
+
+The CLI is included when you install Rasteret:
+
+```bash
+pip install rasteret
+```
+
+Verify installation:
+
+```bash
+rasteret --version
+```
+
+## Command Structure
+
+Rasteret CLI has three main command groups:
+
+- `rasteret datasets` - Browse and manage registered datasets
+- `rasteret collections` - Manage local collection caches
+- `rasteret build` - Quick build shortcut for registered datasets
+
+---
+
+## Datasets Commands
+
+Work with the built-in dataset catalog and local registrations.
+
+### `rasteret datasets list`
+
+List all registered datasets from the catalog.
+
+```bash
+rasteret datasets list [--search KEYWORD] [--json]
+```
+
+**Options:**
+
+- `--search KEYWORD` - Filter datasets by keyword in name/description
+- `--json` - Output results as JSON
+
+**Example:**
+
+```bash
+# List all datasets
+rasteret datasets list
+
+# Search for Sentinel-2 datasets
+rasteret datasets list --search sentinel-2
+
+# Get JSON output
+rasteret datasets list --json
+```
+
+**Output:**
+
+```
+ID                              Name                    Coverage    License         Auth
+--                              ----                    --------    -------         ----
+earthsearch/sentinel-2-l2a      Sentinel-2 L2A          Global      CC-BY-4.0       none
+earthsearch/landsat-c2-l2       Landsat Collection 2    Global      Pddl-1.0        required
+...
+```
+
+---
+
+### `rasteret datasets info`
+
+Show detailed information about a specific dataset.
+
+```bash
+rasteret datasets info DATASET_ID [--json]
+```
+
+**Arguments:**
+
+- `DATASET_ID` - Dataset identifier (e.g., `earthsearch/sentinel-2-l2a`)
+
+**Options:**
+
+- `--json` - Output as JSON
+
+**Example:**
+
+```bash
+rasteret datasets info earthsearch/sentinel-2-l2a
+```
+
+**Output:**
+
+```
+Sentinel-2 L2A (earthsearch/sentinel-2-l2a)
+  Description:  Sentinel-2 Level-2A surface reflectance
+  STAC API:     https://earth-search.aws.element84.com/v1
+  Collection:   sentinel-2-l2a
+  Coverage:     Global
+  License:      CC-BY-4.0
+  Commercial:   yes
+  Temporal:     2015-06-27 to present
+  Bands:        B01, B02, B03, B04, B05, B06, B07, B08, B8A, B09, B11, B12
+  Files:        separate (one per band)
+  Auth:         none
+```
+
+---
+
+### `rasteret datasets build`
+
+Build a collection from a registered dataset.
+
+```bash
+rasteret datasets build DATASET_ID NAME \
+  --bbox MINX,MINY,MAXX,MAXY \
+  --date-range START,END \
+  [options]
+```
+
+**Arguments:**
+
+- `DATASET_ID` - Dataset identifier from the catalog
+- `NAME` - Logical name for the collection
+
+**Required Options:**
+
+- `--bbox MINX,MINY,MAXX,MAXY` - Bounding box in WGS84 (comma-separated)
+- `--date-range START,END` - Date range as `YYYY-MM-DD,YYYY-MM-DD`
+
+**Optional Flags:**
+
+- `--workspace-dir PATH` - Workspace directory (default: `~/rasteret_workspace`)
+- `--force` - Rebuild even if cache exists
+- `--max-concurrent N` - Max concurrent metadata fetches (default: 50)
+- `--query JSON` - Additional STAC query as JSON string
+- `--json` - Output as JSON
+
+**Example:**
+
+```bash
+# Build Sentinel-2 collection for Bangalore
+rasteret datasets build earthsearch/sentinel-2-l2a bangalore \
+  --bbox 77.55,13.01,77.58,13.08 \
+  --date-range 2024-01-01,2024-06-30
+
+# Build with cloud cover filter
+rasteret datasets build earthsearch/sentinel-2-l2a low-cloud \
+  --bbox 77.55,13.01,77.58,13.08 \
+  --date-range 2024-01-01,2024-06-30 \
+  --query '{"eo:cloud_cover": {"lt": 10}}'
+```
+
+**Output:**
+
+```
+Collection built: bangalore
+Path: /home/user/rasteret_workspace/bangalore_stac
+Scenes: 142
+Date range: 2024-01-01T06:23:41 -> 2024-06-29T06:23:51
+```
+
+---
+
+### `rasteret datasets register-local`
+
+Register a local collection or Parquet file as a reusable dataset.
+
+```bash
+rasteret datasets register-local DATASET_ID PATH \
+  [--name NAME] \
+  [--description DESC] \
+  [--data-source SOURCE] \
+  [options]
+```
+
+**Arguments:**
+
+- `DATASET_ID` - Unique identifier (e.g., `local/my-dataset`)
+- `PATH` - Path to collection directory, Parquet file, or cached collection name
+
+**Options:**
+
+- `--name NAME` - Human-readable name
+- `--description DESC` - One-line description
+- `--data-source SOURCE` - Override source identifier for band mapping
+- `--workspace-dir PATH` - Workspace directory when PATH is a cache name
+- `--registry-path PATH` - Custom registry location
+- `--no-persist` - Register only for this process (don't save to disk)
+- `--json` - Output as JSON
+
+**Example:**
+
+```bash
+# Register a local Parquet file
+rasteret datasets register-local local/my-data \
+  /path/to/data.parquet \
+  --name "My Custom Dataset" \
+  --description "Private satellite imagery collection"
+
+# Register a cached collection
+rasteret datasets register-local local/bangalore bangalore \
+  --workspace-dir ~/rasteret_workspace
+```
+
+---
+
+### `rasteret datasets unregister-local`
+
+Remove a local dataset from the registry.
+
+```bash
+rasteret datasets unregister-local DATASET_ID [--registry-path PATH] [--json]
+```
+
+**Example:**
+
+```bash
+rasteret datasets unregister-local local/my-data
+```
+
+---
+
+### `rasteret datasets export-local`
+
+Export a local dataset descriptor as JSON for sharing.
+
+```bash
+rasteret datasets export-local DATASET_ID OUTPUT_PATH \
+  [--registry-path PATH] [--json]
+```
+
+**Example:**
+
+```bash
+rasteret datasets export-local local/my-data my-dataset.json
+```
+
+---
+
+## Collections Commands
+
+Manage local collection caches directly.
+
+### `rasteret collections list`
+
+List all cached collections in the workspace.
+
+```bash
+rasteret collections list [--workspace-dir PATH] [--json]
+```
+
+**Options:**
+
+- `--workspace-dir PATH` - Workspace directory (default: `~/rasteret_workspace`)
+- `--json` - Output as JSON
+
+**Example:**
+
+```bash
+rasteret collections list
+```
+
+**Output:**
+
+```
+name        kind     data_source                size  date_start            date_end
+----        ----     -----------                ----  ----------            --------
+bangalore   stac     sentinel-2-l2a             142   2024-01-01T06:23:41   2024-06-29T06:23:51
+maxar       records  maxar-opendata             87    2023-05-01T00:00:00   2023-08-15T00:00:00
+```
+
+---
+
+### `rasteret collections info`
+
+Show detailed information about a cached collection.
+
+```bash
+rasteret collections info NAME [--workspace-dir PATH] [--json]
+```
+
+**Arguments:**
+
+- `NAME` - Collection name or folder name (supports fuzzy matching)
+
+**Example:**
+
+```bash
+rasteret collections info bangalore
+```
+
+**Output:**
+
+```
+Name: bangalore
+Path: /home/user/rasteret_workspace/bangalore_stac
+Scenes: 142
+Date range: 2024-01-01T06:23:41 -> 2024-06-29T06:23:51
+Split column: no
+Columns (24): id, datetime, geometry, assets, bbox_minx, bbox_miny, bbox_maxx, bbox_maxy, ...
+```
+
+---
+
+### `rasteret collections build`
+
+Build a collection directly from a STAC API (without using the dataset catalog).
+
+```bash
+rasteret collections build NAME \
+  --stac-api URL \
+  --collection STAC_ID \
+  --bbox MINX,MINY,MAXX,MAXY \
+  --date-range START,END \
+  [options]
+```
+
+**Arguments:**
+
+- `NAME` - Logical collection name
+
+**Required Options:**
+
+- `--stac-api URL` - STAC API endpoint URL
+- `--collection STAC_ID` - STAC collection identifier
+- `--bbox MINX,MINY,MAXX,MAXY` - Bounding box (WGS84)
+- `--date-range START,END` - Date range as `YYYY-MM-DD,YYYY-MM-DD`
+
+**Optional Flags:**
+
+- `--workspace-dir PATH` - Workspace directory
+- `--force` - Rebuild if exists
+- `--max-concurrent N` - Max concurrent fetches (default: 50)
+- `--query JSON` - Additional STAC query
+- `--json` - Output as JSON
+
+**Example:**
+
+```bash
+rasteret collections build bangalore \
+  --stac-api https://earth-search.aws.element84.com/v1 \
+  --collection sentinel-2-l2a \
+  --bbox 77.55,13.01,77.58,13.08 \
+  --date-range 2024-01-01,2024-06-30
+```
+
+---
+
+### `rasteret collections import`
+
+Import a local Parquet file as a Rasteret collection.
+
+```bash
+rasteret collections import NAME \
+  --record-table PATH \
+  [--data-source SOURCE] \
+  [--column-map JSON] \
+  [--columns LIST] \
+  [options]
+```
+
+**Arguments:**
+
+- `NAME` - Collection name
+
+**Required Options:**
+
+- `--record-table PATH` - Path or URI to Parquet/GeoParquet file
+
+**Optional Flags:**
+
+- `--data-source SOURCE` - Source identifier for band mapping and URL policy
+- `--column-map JSON` - Column rename mapping as JSON (e.g., `'{"scene_id":"id"}'`)
+- `--columns LIST` - Comma-separated list of columns to include
+- `--workspace-dir PATH` - Workspace directory
+- `--force` - Replace if exists
+- `--json` - Output as JSON
+
+**Example:**
+
+```bash
+# Import from S3 (Source Cooperative)
+export AWS_NO_SIGN_REQUEST=YES
+rasteret collections import maxar \
+  --record-table s3://us-west-2.opendata.source.coop/maxar/maxar-opendata/maxar-opendata.parquet \
+  --data-source maxar-opendata
+
+# Import with column mapping
+rasteret collections import my-data \
+  --record-table /data/scenes.parquet \
+  --column-map '{"scene_id":"id","capture_date":"datetime"}' \
+  --columns "id,datetime,geometry,assets,cloud_cover"
+```
+
+---
+
+### `rasteret collections delete`
+
+Delete a cached collection.
+
+```bash
+rasteret collections delete NAME [--workspace-dir PATH] [--yes]
+```
+
+**Arguments:**
+
+- `NAME` - Collection name or folder name
+
+**Options:**
+
+- `--workspace-dir PATH` - Workspace directory
+- `--yes` - Skip confirmation prompt
+
+**Example:**
+
+```bash
+# Interactive delete (prompts for confirmation)
+rasteret collections delete bangalore
+
+# Force delete without prompt
+rasteret collections delete bangalore --yes
+```
+
+---
+
+## Build Shortcut
+
+Quick build command for registered datasets (shortcut for `datasets build`).
+
+```bash
+rasteret build DATASET_ID NAME \
+  --bbox MINX,MINY,MAXX,MAXY \
+  --date-range START,END \
+  [options]
+```
+
+Same as `rasteret datasets build` but with shorter syntax.
+
+**Example:**
+
+```bash
+rasteret build earthsearch/sentinel-2-l2a bangalore \
+  --bbox 77.55,13.01,77.58,13.08 \
+  --date-range 2024-01-01,2024-06-30
+```
+
+---
+
+## Common Workflows
+
+### Build and inspect a collection
+
+```bash
+# Build from catalog
+rasteret datasets build earthsearch/sentinel-2-l2a bangalore \
+  --bbox 77.55,13.01,77.58,13.08 \
+  --date-range 2024-01-01,2024-06-30
+
+# Check details
+rasteret collections info bangalore
+
+# List all collections
+rasteret collections list
+```
+
+### Import custom Parquet data
+
+```bash
+# Import and register
+rasteret collections import my-data \
+  --record-table /data/scenes.parquet \
+  --data-source custom-source
+
+# Register as reusable dataset
+rasteret datasets register-local local/my-data my-data
+
+# Now build from it
+rasteret build local/my-data my-data-subset \
+  --bbox -122.5,37.7,-122.3,37.9 \
+  --date-range 2024-01-01,2024-12-31
+```
+
+### Clean up workspace
+
+```bash
+# List what's cached
+rasteret collections list
+
+# Delete specific collections
+rasteret collections delete old-data --yes
+rasteret collections delete temp-collection --yes
+```
+
+---
+
+## Environment Variables
+
+- `AWS_NO_SIGN_REQUEST=YES` - Access public S3 buckets without credentials (Source Cooperative)
+- `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` - AWS credentials for requester-pays buckets (Landsat)
+- `AWS_PROFILE` - Use named AWS profile
+
+---
+
+## Exit Codes
+
+- `0` - Success
+- `1` - Error (dataset not found, collection not found, validation failed)
+- `2` - Unsupported command
+
+---
+
+## See Also
+
+- [Python API Reference](/api/collection) - Use Rasteret from Python
+- [Quickstart](/quickstart) - Get started with Rasteret
+- [Examples](/examples/sentinel-2-ml) - Complete workflows

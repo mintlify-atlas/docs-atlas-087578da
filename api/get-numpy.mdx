@@ -1,0 +1,124 @@
+---
+title: Collection.get_numpy()
+description: Load raster data into NumPy arrays for analysis
+---
+
+## Method Signature
+
+```python
+Collection.get_numpy(
+    geometries,
+    bands,
+    *,
+    max_concurrent=50,
+    cloud_config=None,
+    data_source=None,
+    backend=None,
+    target_crs=None,
+    **filters
+)
+```
+
+Load selected bands into NumPy arrays for the specified geometries.
+
+## Parameters
+
+<ParamField path="geometries" type="bbox tuple, pa.Array, Shapely, WKB bytes, or GeoJSON dict" required>
+  Area(s) of interest to load. Accepts `(minx, miny, maxx, maxy)` bbox tuples, Arrow arrays (e.g. from GeoParquet), Shapely objects, raw WKB bytes, or GeoJSON dicts.
+</ParamField>
+
+<ParamField path="bands" type="list of str" required>
+  Band codes to load (e.g. `["B04", "B03", "B02"]`).
+</ParamField>
+
+<ParamField path="max_concurrent" type="int" default="50">
+  Maximum concurrent HTTP requests for fetching raster tiles.
+</ParamField>
+
+<ParamField path="cloud_config" type="CloudConfig">
+  Cloud configuration for URL rewriting and authenticated access.
+</ParamField>
+
+<ParamField path="data_source" type="str">
+  Override the inferred data source identifier.
+</ParamField>
+
+<ParamField path="backend" type="StorageBackend">
+  Pluggable I/O backend for authenticated range reads. See [create_backend()](/api/backends).
+</ParamField>
+
+<ParamField path="target_crs" type="int">
+  EPSG code to reproject all records to before assembly.
+</ParamField>
+
+<ParamField path="**filters" type="kwargs">
+  Additional keyword arguments passed to [subset()](/api/collection#subset).
+</ParamField>
+
+## Returns
+
+<ResponseField name="array" type="numpy.ndarray">
+  Single-band queries return `[N, H, W]`. Multi-band queries return `[N, C, H, W]` in requested band order. Data is in native COG dtype (e.g. `uint16` for Sentinel-2).
+</ResponseField>
+
+## Examples
+
+### Single Band Load
+
+```python
+import rasteret
+
+collection = rasteret.load("my_collection")
+
+# Load red band for a bounding box
+bbox = (-122.5, 37.7, -122.3, 37.9)
+red = collection.get_numpy(
+    geometries=bbox,
+    bands=["B04"]
+)
+
+print(red.shape)  # (N, H, W)
+```
+
+### Multi-Band RGB Stack
+
+```python
+# Load RGB bands as a stack
+rgb = collection.get_numpy(
+    geometries=bbox,
+    bands=["B04", "B03", "B02"]
+)
+
+print(rgb.shape)  # (N, 3, H, W)
+```
+
+### With Filters
+
+```python
+# Load with cloud cover and date filters
+clean_imagery = collection.get_numpy(
+    geometries=bbox,
+    bands=["B04", "B03", "B02"],
+    cloud_cover_lt=10,
+    date_range=("2023-06-01", "2023-08-31")
+)
+```
+
+### With CRS Reprojection
+
+```python
+# Reproject to UTM Zone 10N before loading
+data = collection.get_numpy(
+    geometries=bbox,
+    bands=["B08"],
+    target_crs=32610
+)
+```
+
+## Notes
+
+- Data is returned in native COG dtype (typically `uint16` for Sentinel-2, Landsat)
+- All scenes are loaded and stacked along the first dimension
+- For single-band queries, shape is `[N, H, W]`
+- For multi-band queries, shape is `[N, C, H, W]` where C is the number of bands
+- Bands are ordered as specified in the `bands` parameter

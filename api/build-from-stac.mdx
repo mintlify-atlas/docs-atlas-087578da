@@ -1,0 +1,160 @@
+---
+title: 'rasteret.build_from_stac()'
+description: 'Build or load a local Parquet-backed collection from a STAC API'
+---
+
+## Function Signature
+
+```python
+rasteret.build_from_stac(
+    *,
+    name: str,
+    stac_api: str,
+    collection: str,
+    data_source: str | None = None,
+    band_map: dict[str, str] | None = None,
+    band_index_map: dict[str, int] | None = None,
+    bbox: tuple[float, float, float, float] | None = None,
+    date_range: tuple[str, str] | None = None,
+    workspace_dir: str | Path | None = None,
+    force: bool = False,
+    max_concurrent: int = 50,
+    cloud_config: Any = None,
+    query: dict[str, Any] | None = None,
+    backend: StorageBackend | None = None,
+    static_catalog: bool = False,
+) -> Collection
+```
+
+## Description
+
+Build or load a local Parquet-backed collection from a STAC API. Searches STAC, parses COG headers for tile metadata, and stores everything in a local Parquet index.
+
+On subsequent calls with the same parameters, Rasteret reuses the cached index (no STAC query / header parsing), but pixel reads still fetch remote tiles unless assets are local.
+
+## Parameters
+
+<ParamField path="name" type="str" required>
+  Logical name for the collection.
+</ParamField>
+
+<ParamField path="stac_api" type="str" required>
+  STAC API endpoint URL.
+</ParamField>
+
+<ParamField path="collection" type="str" required>
+  STAC collection ID (e.g., `"sentinel-2-l2a"`).
+</ParamField>
+
+<ParamField path="data_source" type="str">
+  Optional Rasteret data-source key used for band mapping and cloud config lookup. Defaults to *collection*. Use this to namespace provider-specific conventions (e.g., `"earthsearch/sentinel-2-l2a"` vs `"pc/sentinel-2-l2a"`) and avoid collisions.
+</ParamField>
+
+<ParamField path="band_map" type="dict[str, str]">
+  Optional mapping of band code to STAC asset key. When omitted, Rasteret falls back to built-in mappings for known collections.
+</ParamField>
+
+<ParamField path="band_index_map" type="dict[str, int]">
+  Optional mapping of band code to the 0-based band/sample index within a multi-sample GeoTIFF asset. Required when multiple requested bands map to the same STAC asset key (e.g., a single multi-band `"image"` COG).
+</ParamField>
+
+<ParamField path="bbox" type="tuple[float, float, float, float]" required>
+  `(minx, miny, maxx, maxy)` bounding box for the search.
+</ParamField>
+
+<ParamField path="date_range" type="tuple[str, str]" required>
+  `(start, end)` ISO date strings.
+</ParamField>
+
+<ParamField path="workspace_dir" type="str | Path">
+  Directory for the local cache. Defaults to `~/rasteret_workspace`.
+</ParamField>
+
+<ParamField path="force" type="bool" default="False">
+  Rebuild even if a cache already exists.
+</ParamField>
+
+<ParamField path="max_concurrent" type="int" default="50">
+  Maximum concurrent COG header fetch operations.
+</ParamField>
+
+<ParamField path="cloud_config" type="CloudConfig">
+  Cloud configuration for URL rewriting.
+</ParamField>
+
+<ParamField path="query" type="dict">
+  Additional STAC search query parameters.
+</ParamField>
+
+<ParamField path="backend" type="StorageBackend">
+  I/O backend for authenticated range reads during COG header parsing. See `create_backend()`.
+</ParamField>
+
+<ParamField path="static_catalog" type="bool" default="False">
+  Set to `True` for static STAC catalogs (no `/search` endpoint).
+</ParamField>
+
+## Returns
+
+<ResponseField name="collection" type="Collection">
+  A Collection object ready for spatial queries and pixel reads.
+</ResponseField>
+
+## Usage Example
+
+```python
+import rasteret
+
+# Build from Earth Search STAC API
+collection = rasteret.build_from_stac(
+    name="bay-area-s2",
+    stac_api="https://earth-search.aws.element84.com/v1",
+    collection="sentinel-2-l2a",
+    bbox=(-122.5, 37.5, -122.0, 38.0),
+    date_range=("2024-01-01", "2024-03-31"),
+)
+
+print(f"Built collection with {len(collection)} scenes")
+
+# Build with custom band mapping
+collection = rasteret.build_from_stac(
+    name="landsat-c2",
+    stac_api="https://landsatlook.usgs.gov/stac-server",
+    collection="landsat-c2l2-sr",
+    data_source="usgs/landsat-c2l2-sr",
+    band_map={
+        "B02": "blue",
+        "B03": "green",
+        "B04": "red",
+        "B05": "nir08",
+    },
+    bbox=(-122.5, 37.5, -122.0, 38.0),
+    date_range=("2024-01-01", "2024-03-31"),
+)
+
+# Build with additional query filters
+collection = rasteret.build_from_stac(
+    name="low-cloud",
+    stac_api="https://earth-search.aws.element84.com/v1",
+    collection="sentinel-2-l2a",
+    bbox=(-122.5, 37.5, -122.0, 38.0),
+    date_range=("2024-01-01", "2024-03-31"),
+    query={"eo:cloud_cover": {"lt": 10}},
+)
+
+# Force rebuild of existing cache
+collection = rasteret.build_from_stac(
+    name="bay-area-s2",
+    stac_api="https://earth-search.aws.element84.com/v1",
+    collection="sentinel-2-l2a",
+    bbox=(-122.5, 37.5, -122.0, 38.0),
+    date_range=("2024-01-01", "2024-03-31"),
+    force=True,
+)
+```
+
+## Related Functions
+
+- [build()](/api/build) - Build from a registered dataset
+- [build_from_table()](/api/build-from-table) - Build from external Parquet/GeoParquet
+- [Collection](/api/collection) - Collection class reference

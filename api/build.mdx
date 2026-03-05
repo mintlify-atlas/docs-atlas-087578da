@@ -1,0 +1,126 @@
+---
+title: 'rasteret.build()'
+description: 'Build a Collection from a registered dataset'
+---
+
+## Function Signature
+
+```python
+rasteret.build(
+    dataset: str,
+    *,
+    name: str,
+    bbox: tuple[float, float, float, float] | None = None,
+    date_range: tuple[str, str] | None = None,
+    workspace_dir: str | Path | None = None,
+    force: bool = False,
+    max_concurrent: int = 50,
+    query: dict[str, Any] | None = None,
+    prefer_geoparquet: bool = False,
+    stac_api: str | None = None,
+    cloud_config: Any = None,
+    backend: StorageBackend | None = None,
+) -> Collection
+```
+
+## Description
+
+Build a Collection from a registered dataset. Looks up the dataset in the `DatasetRegistry` and routes to either `build_from_stac()` or `build_from_table()` based on the descriptor's access fields.
+
+For descriptors backed only by `geoparquet_uri` (e.g., local collections registered with `register_local()`), `bbox` and `date_range` are optional and ignored.
+
+For auth-required datasets, Rasteret can auto-create a backend from a descriptor's `s3_credentials_url` when no explicit backend is passed. This requires valid credentials in the environment (or `~/.netrc`) for the relevant provider.
+
+## Parameters
+
+<ParamField path="dataset" type="str" required>
+  Registry ID (e.g., `"earthsearch/sentinel-2-l2a"`).
+</ParamField>
+
+<ParamField path="name" type="str" required>
+  Logical name for the collection.
+</ParamField>
+
+<ParamField path="bbox" type="tuple[float, float, float, float]">
+  `(minx, miny, maxx, maxy)` bounding box. Required for STAC-backed descriptors.
+</ParamField>
+
+<ParamField path="date_range" type="tuple[str, str]">
+  `(start, end)` ISO date strings. Required for STAC-backed descriptors.
+</ParamField>
+
+<ParamField path="workspace_dir" type="str | Path">
+  Cache directory. Defaults to `~/rasteret_workspace`.
+</ParamField>
+
+<ParamField path="force" type="bool" default="False">
+  Rebuild even if a cache already exists.
+</ParamField>
+
+<ParamField path="max_concurrent" type="int" default="50">
+  Maximum concurrent COG header fetches.
+</ParamField>
+
+<ParamField path="query" type="dict">
+  Additional STAC search parameters.
+</ParamField>
+
+<ParamField path="prefer_geoparquet" type="bool" default="False">
+  Use the GeoParquet path when available.
+</ParamField>
+
+<ParamField path="stac_api" type="str">
+  Override the descriptor's default STAC API endpoint.
+</ParamField>
+
+<ParamField path="cloud_config" type="CloudConfig">
+  Cloud configuration for URL rewriting.
+</ParamField>
+
+<ParamField path="backend" type="StorageBackend">
+  I/O backend for authenticated range reads. When omitted, Rasteret auto-creates one for known auth-required datasets. See `create_backend()`.
+</ParamField>
+
+## Returns
+
+<ResponseField name="collection" type="Collection">
+  A Collection object ready for spatial queries and pixel reads.
+</ResponseField>
+
+## Raises
+
+- **KeyError**: If the dataset is not in the registry.
+- **ValueError**: If the descriptor has no configured access method, or if auth is required but no backend could be created.
+
+## Usage Example
+
+```python
+import rasteret
+
+# Build from a registered dataset
+collection = rasteret.build(
+    "earthsearch/sentinel-2-l2a",
+    name="bay-area-2024",
+    bbox=(-122.5, 37.5, -122.0, 38.0),
+    date_range=("2024-01-01", "2024-03-31"),
+)
+
+print(f"Built collection with {len(collection)} scenes")
+
+# Force rebuild with additional query parameters
+collection = rasteret.build(
+    "earthsearch/sentinel-2-l2a",
+    name="bay-area-clear",
+    bbox=(-122.5, 37.5, -122.0, 38.0),
+    date_range=("2024-01-01", "2024-03-31"),
+    query={"eo:cloud_cover": {"lt": 10}},
+    force=True,
+)
+```
+
+## Related Functions
+
+- [build_from_stac()](/api/build-from-stac) - Build directly from STAC API
+- [build_from_table()](/api/build-from-table) - Build from external Parquet/GeoParquet
+- [load()](/api/load) - Load a persisted Collection
+- [DatasetRegistry](/api/dataset-registry) - Registry of dataset descriptors

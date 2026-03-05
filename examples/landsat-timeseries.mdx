@@ -1,0 +1,252 @@
+---
+title: Landsat Time Series Analysis
+description: Query Landsat requester-pays data and compute NDVI time series with xarray
+icon: chart-line
+---
+
+This example demonstrates working with Landsat Collection 2 Level-2 data from AWS Earth Search, which requires AWS credentials (requester-pays bucket). We'll build a collection, fetch bands as xarray, and compute NDVI.
+
+## Overview
+
+Landsat on Earth Search is hosted in a **requester-pays** S3 bucket, meaning you need AWS credentials configured to access the data.
+
+**What you'll learn:**
+
+- Configure AWS credentials for requester-pays buckets
+- Build Landsat collections from Earth Search
+- Fetch multi-band xarray datasets
+- Compute NDVI from red/NIR bands
+
+## Prerequisites
+
+### Install Rasteret
+
+```bash
+pip install rasteret
+```
+
+### Configure AWS Credentials
+
+Landsat requires AWS credentials. Choose one method:
+
+**Option 1: AWS CLI**
+```bash
+aws configure
+# Enter your AWS Access Key ID, Secret Access Key, and region
+```
+
+**Option 2: Environment Variables**
+```bash
+export AWS_ACCESS_KEY_ID=your_access_key
+export AWS_SECRET_ACCESS_KEY=your_secret_key
+export AWS_DEFAULT_REGION=us-west-2
+```
+
+**Option 3: AWS Profile**
+```bash
+export AWS_PROFILE=your_profile_name
+```
+
+## Complete Example
+
+```python
+import rasteret
+
+# Bangalore, India bounding box
+BBOX = (77.55, 13.01, 77.58, 13.08)
+
+# Step 1: Build Landsat collection
+collection = rasteret.build(
+    "earthsearch/landsat-c2-l2",
+    name="bangalorelandsat",
+    bbox=BBOX,
+    date_range=("2024-01-01", "2024-01-31"),
+    force=True,  # Rebuild cache
+)
+print(f"Collection: {collection.name}, rows={collection.dataset.count_rows()}")
+```
+
+**Output:**
+```
+Collection: bangalorelandsat, rows=3
+```
+
+## Fetch Bands as xarray
+
+Use `get_xarray()` to fetch red and NIR bands for the bounding box:
+
+```python
+# Step 2: Fetch B4 (red) and B5 (NIR) bands
+ds = collection.get_xarray(
+    geometries=BBOX,
+    bands=["B4", "B5"],  # Landsat 8/9: B4=red, B5=NIR
+)
+
+print(f"xarray Dataset:")
+print(ds)
+```
+
+**Output:**
+```
+xarray Dataset:
+<xarray.Dataset>
+Dimensions:  (y: 78, x: 33, time: 3)
+Coordinates:
+  * x        (x) float64 8.626e+06 8.626e+06 ... 8.627e+06 8.627e+06
+  * y        (y) float64 1.441e+06 1.441e+06 ... 1.44e+06 1.44e+06
+  * time     (time) datetime64[ns] 2024-01-05 2024-01-13 2024-01-21
+Data variables:
+    B4       (time, y, x) float32 ...
+    B5       (time, y, x) float32 ...
+```
+
+## Compute NDVI
+
+NDVI (Normalized Difference Vegetation Index) is calculated as `(NIR - Red) / (NIR + Red)`:
+
+```python
+# Step 3: Calculate NDVI
+ndvi = (ds["B5"] - ds["B4"]) / (ds["B5"] + ds["B4"])
+
+print(f"NDVI shape: {ndvi.shape}")
+print(f"NDVI range: [{float(ndvi.min()):.3f}, {float(ndvi.max()):.3f}]")
+```
+
+**Output:**
+```
+NDVI shape: (3, 78, 33)
+NDVI range: [-0.542, 0.823]
+```
+
+## Time Series Analysis
+
+Extract NDVI time series for a specific pixel:
+
+```python
+# Extract pixel at center of bbox
+center_y = ndvi.shape[1] // 2
+center_x = ndvi.shape[2] // 2
+
+time_series = ndvi[:, center_y, center_x]
+
+print("\nNDVI time series at center pixel:")
+for i, (time, value) in enumerate(zip(ds.time.values, time_series.values)):
+    print(f"  {time}: {float(value):.3f}")
+```
+
+**Output:**
+```
+NDVI time series at center pixel:
+  2024-01-05T05:42:13: 0.245
+  2024-01-13T05:42:21: 0.312
+  2024-01-21T05:42:29: 0.387
+```
+
+## Visualize NDVI (Optional)
+
+```python
+import matplotlib.pyplot as plt
+
+# Plot NDVI for first timestamp
+fig, ax = plt.subplots(figsize=(10, 8))
+im = ax.imshow(ndvi[0], cmap="RdYlGn", vmin=-1, vmax=1)
+plt.colorbar(im, ax=ax, label="NDVI")
+ax.set_title(f"NDVI - {ds.time.values[0]}")
+plt.show()
+```
+
+## Multi-Month Time Series
+
+Expand the date range for longer time series:
+
+```python
+# Build collection for entire year
+collection_annual = rasteret.build(
+    "earthsearch/landsat-c2-l2",
+    name="bangalore-landsat-2024",
+    bbox=BBOX,
+    date_range=("2024-01-01", "2024-12-31"),
+)
+
+# Fetch and compute NDVI
+ds_annual = collection_annual.get_xarray(
+    geometries=BBOX,
+    bands=["B4", "B5"],
+)
+ndvi_annual = (ds_annual["B5"] - ds_annual["B4"]) / (ds_annual["B5"] + ds_annual["B4"])
+
+print(f"Annual NDVI: {ndvi_annual.shape[0]} timestamps")
+```
+
+## CLI Alternative
+
+Build the collection via CLI:
+
+```bash
+# Ensure AWS credentials are configured
+aws configure
+
+# Build collection
+rasteret build earthsearch/landsat-c2-l2 bangalorelandsat \
+  --bbox 77.55,13.01,77.58,13.08 \
+  --date-range 2024-01-01,2024-01-31
+
+# Check details
+rasteret collections info bangalorelandsat
+```
+
+## Landsat Band Reference
+
+| Band | Wavelength | Description | Common Use |
+|------|------------|-------------|------------|
+| B1 | 0.43-0.45 μm | Coastal/Aerosol | Coastal and aerosol studies |
+| B2 | 0.45-0.51 μm | Blue | Bathymetric mapping |
+| B3 | 0.53-0.59 μm | Green | Vegetation discrimination |
+| B4 | 0.64-0.67 μm | Red | Vegetation slopes |
+| B5 | 0.85-0.88 μm | NIR | Biomass content, water body delineation |
+| B6 | 1.57-1.65 μm | SWIR 1 | Soil moisture, vegetation moisture |
+| B7 | 2.11-2.29 μm | SWIR 2 | Improved soil/vegetation separation |
+
+## Troubleshooting
+
+### "No credentials" error
+
+If you see AWS credential errors:
+
+```python
+# Check if credentials are configured
+import boto3
+session = boto3.Session()
+creds = session.get_credentials()
+if creds is None:
+    print("No AWS credentials found. Run 'aws configure'.")
+else:
+    print(f"Using credentials: {creds.access_key[:8]}...")
+```
+
+### Missing bands
+
+If bands aren't available:
+
+```python
+# List available bands for the collection
+table = collection.dataset.to_table(columns=["assets"])
+print(collection.list_available_bands())
+```
+
+## Key Features
+
+- **Requester-pays support**: Automatic handling of AWS requester-pays buckets
+- **Lazy loading**: Only fetches data for specified geometries and bands
+- **xarray integration**: Direct integration with xarray for analysis
+- **Time series ready**: Automatically stacks scenes along time dimension
+
+## Next Steps
+
+- [Multi-Source Training](/examples/multi-source-training) - Combine Landsat and Sentinel-2
+- [Custom Parquet Ingestion](/examples/custom-parquet-ingestion) - Import custom datasets
+- [Sentinel-2 ML Training](/examples/sentinel-2-ml) - Train models with TorchGeo
+
+## Complete Script
+
+Full example: [`landsat_xarray.py`](https://github.com/TerraFloww/rasteret/blob/main/examples/landsat_xarray.py)

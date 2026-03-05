@@ -1,0 +1,351 @@
+---
+title: "Contributing Datasets"
+description: "Add new datasets to the Rasteret catalog"
+---
+
+## Overview
+
+Rasteret includes a catalog of 15+ built-in datasets (Sentinel-2, Landsat, NAIP, etc.). You can:
+
+- Contribute new datasets to the public catalog
+- Register private datasets locally
+- Share custom `DatasetDescriptor` JSONs with your team
+
+This guide covers the full workflow from descriptor creation to upstream contribution.
+
+## DatasetDescriptor Anatomy
+
+From `src/rasteret/catalog.py:50-186`, a `DatasetDescriptor` captures:
+
+```python
+from rasteret.catalog import DatasetDescriptor
+
+descriptor = DatasetDescriptor(
+    # --- Identity ---
+    id="acme/field-survey-2024",
+    name="ACME Field Survey",
+    description="Drone imagery from field surveys",
+    
+    # --- Access (pick one: STAC or GeoParquet) ---
+    stac_api="https://api.acme.com/stac/v1",
+    stac_collection="field-survey-2024",
+    # OR
+    geoparquet_uri="s3://acme-data/items.parquet",
+    
+    # --- Band mapping ---
+    band_map={
+        "R": "image",
+        "G": "image",
+        "B": "image",
+        "NIR": "image",
+    },
+    band_index_map={"R": 0, "G": 1, "B": 2, "NIR": 3},
+    separate_files=False,  # Single multi-band COG
+    
+    # --- Coverage metadata ---
+    spatial_coverage="north-america",
+    temporal_range=("2024-01-01", "2024-12-31"),
+    requires_auth=False,
+    license="CC-BY-4.0",
+    license_url="https://creativecommons.org/licenses/by/4.0/",
+    commercial_use=True,
+    
+    # --- Cloud configuration (optional) ---
+    cloud_config={
+        "provider": "aws",
+        "requester_pays": False,
+        "region": "us-west-2",
+        "url_patterns": {},
+    },
+    
+    # --- Examples for docs/tests ---
+    example_bbox=(-122.5, 37.7, -122.3, 37.9),
+    example_date_range=("2024-06-01", "2024-07-01"),
+)
+```
+
+## Prerequisites for Contributing
+
+Before opening a PR to add a dataset, verify:
+
+### 1. Data Source is Reachable
+
+The STAC API or GeoParquet URI must be publicly accessible (or gated behind standard OAuth/SAS).
+
+```bash
+# For STAC APIs
+curl "https://api.example.com/stac/v1/collections/my-collection"
+
+# For GeoParquet
+AWS_NO_SIGN_REQUEST=YES aws s3 ls s3://bucket/items.parquet
+```
+
+### 2. Band Map Points to Parseable COGs
+
+Assets must be tiled GeoTIFFs with `TileOffsets` and `TileByteCounts`:
+
+```python
+import rasteret
+from rasteret.catalog import DatasetDescriptor, DatasetRegistry
+
+# Register descriptor
+DatasetRegistry.register(descriptor)
+
+# Attempt a build
+collection = rasteret.build(
+    "acme/field-survey-2024",
+    name="test",
+    bbox=descriptor.example_bbox,
+    date_range=descriptor.example_date_range,
+)
+
+print(f"✓ Build succeeded: {collection.dataset.count_rows()} rows")
+```
+
+From `CONTRIBUTING.md:33-39`, enrichment must succeed end-to-end.
+
+### 3. License Metadata is Verified
+
+Confirm:
+- `license` matches the STAC collection's `license` field (typically an SPDX ID like `"CC-BY-4.0"` or `"proprietary"`)
+- `license_url` points to the full license text (from STAC's `rel=license` link)
+- `commercial_use` is `False` if the license prohibits commercial use (e.g., `CC-BY-NC`)
+
+### 4. Example Works End-to-End
+
+```python
+import rasteret
+
+collection = rasteret.build(
+    "acme/field-survey-2024",
+    name="test",
+    bbox=descriptor.example_bbox,
+    date_range=descriptor.example_date_range,
+)
+
+# Fetch a sample
+array = collection.get_numpy(
+    geometries=descriptor.example_bbox,
+    bands=["R", "G", "B"],
+)
+
+assert array.shape[0] > 0, "No data returned"
+print(f"✓ Read succeeded: {array.shape}")
+```
+
+## Adding a Dataset to the Catalog
+
+### Step 1: Create the Descriptor
+
+Edit `src/rasteret/catalog.py` and add your descriptor after the existing entries:
+
+```python
+# At the end of the built-in descriptors section (~line 720)
+DatasetRegistry.register(
+    DatasetDescriptor(
+        id="acme/field-survey-2024",
+        name="ACME Field Survey",
+        description="Drone imagery from field surveys, 10cm resolution",
+        stac_api="https://api.acme.com/stac/v1",
+        stac_collection="field-survey-2024",
+        band_map={
+            "R": "image",
+            "G": "image",
+            "B": "image",
+            "NIR": "image",
+        },
+        band_index_map={"R": 0, "G": 1, "B": 2, "NIR": 3},
+        separate_files=False,
+        spatial_coverage="north-america",
+        temporal_range=("2024-01-01", "2024-12-31"),
+        license="CC-BY-4.0",
+        license_url="https://creativecommons.org/licenses/by/4.0/",
+        example_bbox=(-122.5, 37.7, -122.3, 37.9),
+        example_date_range=("2024-06-01", "2024-07-01"),
+    )
+)
+```
+
+### Step 2: Run Tests
+
+```bash
+uv run pytest -k test_catalog
+```
+
+Ensure the new descriptor appears in `DatasetRegistry.list()`.
+
+### Step 3: Add Documentation
+
+Create an example page in `docs/examples/` showing how to use the dataset:
+
+```mdx
+---
+title: "ACME Field Survey"
+description: "High-resolution drone imagery for crop monitoring"
+---
+
+## Overview
+
+The ACME Field Survey dataset provides 10cm resolution RGB+NIR imagery...
+
+## Quick Start
+
+```python
+import rasteret
+
+collection = rasteret.build(
+    "acme/field-survey-2024",
+    name="field_survey",
+    bbox=(-122.5, 37.7, -122.3, 37.9),
+    date_range=("2024-06-01", "2024-07-01"),
+)
+```
+```
+
+### Step 4: Open a Pull Request
+
+From `CONTRIBUTING.md:26-32`, before submitting:
+
+1. Run `uv run ruff check src/` and `uv run ruff format --check src/`
+2. Run `uv run pytest -q` - all tests should pass
+3. Sign your commits with `git commit -s` (DCO)
+
+Include in your PR description:
+- Link to the data provider's documentation
+- Confirmation that the license permits inclusion
+- Output from the example query showing successful reads
+
+## Registering Local Datasets
+
+For private or experimental datasets, use `register_local()`:
+
+```python
+import rasteret
+from pathlib import Path
+
+# Build and persist a collection
+collection = rasteret.build_from_stac(
+    name="my_private_collection",
+    stac_api="https://private-api.example.com/stac/v1",
+    collection="my-collection",
+    bbox=(77.5, 12.9, 77.7, 13.1),
+    date_range=("2024-01-01", "2024-06-30"),
+)
+
+collection.export("private_collection")
+
+# Register it as a local dataset
+from rasteret.catalog import DatasetDescriptor
+
+descriptor = rasteret.register_local(
+    dataset_id="local/my-private-collection",
+    path="private_collection",
+    name="My Private Collection",
+    description="Internal field campaign data",
+    persist=True,  # Save to ~/.rasteret/datasets.local.json
+)
+
+print(f"Registered: {descriptor.id}")
+```
+
+Now it's available via `rasteret.build()`:
+
+```python
+# In a new session
+import rasteret
+
+collection = rasteret.build(
+    "local/my-private-collection",
+    name="reloaded",
+)
+```
+
+## Sharing Custom Descriptors
+
+Export a descriptor as JSON and share with your team:
+
+```python
+from rasteret.catalog import export_local_descriptor
+
+export_local_descriptor(
+    dataset_id="local/my-private-collection",
+    output_path="shared_descriptor.json",
+)
+```
+
+Team members can load it:
+
+```python
+import json
+from rasteret.catalog import DatasetDescriptor, DatasetRegistry
+
+with open("shared_descriptor.json") as f:
+    descriptor_dict = json.load(f)
+
+descriptor = DatasetDescriptor(**descriptor_dict)
+DatasetRegistry.register(descriptor)
+
+# Now usable with rasteret.build()
+```
+
+## GeoParquet-Backed Descriptors
+
+For datasets distributed as GeoParquet instead of STAC:
+
+```python
+from rasteret.catalog import DatasetDescriptor, DatasetRegistry
+
+descriptor = DatasetDescriptor(
+    id="maxar/opendata",
+    name="Maxar Open Data",
+    description="Post-disaster satellite imagery",
+    geoparquet_uri="s3://us-west-2.opendata.source.coop/maxar/maxar-opendata/maxar-opendata.parquet",
+    column_map={
+        "id": "id",
+        "date": "datetime",
+        "geom": "geometry",
+        "tif_url": "assets",
+    },
+    href_column="tif_url",
+    band_index_map={"R": 0, "G": 1, "B": 2},
+    bbox_columns={
+        "minx": "bbox_minx",
+        "miny": "bbox_miny",
+        "maxx": "bbox_maxx",
+        "maxy": "bbox_maxy",
+    },
+    band_map={"R": "image", "G": "image", "B": "image"},
+    separate_files=False,
+    spatial_coverage="global",
+    requires_auth=False,
+    license="CC-BY-NC-4.0",
+    license_url="https://creativecommons.org/licenses/by-nc/4.0/",
+    commercial_use=False,
+)
+
+DatasetRegistry.register(descriptor)
+```
+
+From `src/rasteret/catalog.py:86-101`, the normalisation layer constructs `assets` from `href_column` and `band_index_map`.
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Use Namespaced IDs">
+    Prefix dataset IDs with the provider or organization: `earthsearch/sentinel-2-l2a`, `pc/sentinel-2-l2a`, `local/my-data`. This avoids collisions when multiple providers host the same collection.
+  </Accordion>
+
+  <Accordion title="Provide Working Examples">
+    Always include `example_bbox` and `example_date_range` that are known to return data. These are used in live tests and documentation.
+  </Accordion>
+
+  <Accordion title="Test End-to-End Before Contributing">
+    Run `rasteret.build()` followed by `get_numpy()` with your example parameters. If enrichment or reads fail, the dataset isn't ready for upstreaming.
+  </Accordion>
+</AccordionGroup>
+
+## Related Resources
+
+- [CONTRIBUTING.md](https://github.com/terrafloww/rasteret/blob/main/CONTRIBUTING.md) - Full contributor guide
+- [Dataset Catalog Concept](/concepts/dataset-catalog) - How the catalog works
+- [Custom Datasets Guide](/guides/custom-datasets) - Using external datasets

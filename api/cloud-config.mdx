@@ -1,0 +1,189 @@
+---
+title: CloudConfig
+description: Configure cloud storage access and URL rewriting
+---
+
+## Class Definition
+
+```python
+from rasteret import CloudConfig
+
+config = CloudConfig(
+    provider,
+    requester_pays=False,
+    region="us-west-2",
+    url_patterns={}
+)
+```
+
+Storage configuration for a data source. CloudConfig manages URL rewriting and requester-pays access for cloud-hosted datasets.
+
+## Parameters
+
+<ParamField path="provider" type="str" required>
+  Cloud provider identifier (e.g. `"aws"`, `"gcs"`, `"azure"`).
+</ParamField>
+
+<ParamField path="requester_pays" type="bool" default="False">
+  Whether the data source requires requester-pays access. Set to `True` for datasets like Landsat Collection 2.
+</ParamField>
+
+<ParamField path="region" type="str" default="us-west-2">
+  Cloud region for the data source.
+</ParamField>
+
+<ParamField path="url_patterns" type="dict[str, str]" default="{}">
+  URL pattern rewrites for converting HTTP URLs to cloud URIs. Keys are HTTP prefixes, values are cloud URIs (e.g. `{"https://landsatlook.usgs.gov/data/": "s3://usgs-landsat/"}`).
+</ParamField>
+
+## Class Methods
+
+### register()
+
+```python
+CloudConfig.register(collection_id: str, config: CloudConfig) -> None
+```
+
+Register a cloud config for a collection ID.
+
+<ParamField path="collection_id" type="str" required>
+  Collection identifier (e.g. `"my-collection"`).
+</ParamField>
+
+<ParamField path="config" type="CloudConfig" required>
+  Configuration to register.
+</ParamField>
+
+### get_config()
+
+```python
+CloudConfig.get_config(data_source: str) -> CloudConfig | None
+```
+
+Look up cloud config for a data source.
+
+<ParamField path="data_source" type="str" required>
+  Data source identifier.
+</ParamField>
+
+<ResponseField name="config" type="CloudConfig | None">
+  The registered configuration, or `None` if not found.
+</ResponseField>
+
+## Examples
+
+### Register Custom Config
+
+```python
+from rasteret import CloudConfig
+
+# Register config for a custom collection
+CloudConfig.register(
+    "my-collection",
+    CloudConfig(
+        provider="aws",
+        requester_pays=True,
+        region="eu-west-1"
+    )
+)
+```
+
+### With URL Rewriting
+
+```python
+# Rewrite HTTP URLs to S3 URIs
+CloudConfig.register(
+    "my-collection",
+    CloudConfig(
+        provider="aws",
+        region="us-west-2",
+        url_patterns={
+            "https://example.com/data/": "s3://my-bucket/"
+        }
+    )
+)
+```
+
+### Requester Pays Dataset
+
+```python
+# Configuration for Landsat (requester pays)
+landsat_config = CloudConfig(
+    provider="aws",
+    requester_pays=True,
+    region="us-west-2",
+    url_patterns={
+        "https://landsatlook.usgs.gov/data/": "s3://usgs-landsat/"
+    }
+)
+
+CloudConfig.register("landsat-c2-l2", landsat_config)
+```
+
+### Using with Collections
+
+```python
+import rasteret
+
+# Config is automatically applied when building
+collection = rasteret.build(
+    "landsat-c2-l2",
+    name="my_area",
+    bbox=(-122.5, 37.7, -122.3, 37.9),
+    date_range=("2023-06-01", "2023-08-31")
+)
+
+# Or pass explicitly
+custom_config = CloudConfig(
+    provider="aws",
+    region="eu-west-1"
+)
+
+data = collection.get_xarray(
+    geometries=bbox,
+    bands=["B04"],
+    cloud_config=custom_config
+)
+```
+
+### Lookup Config
+
+```python
+# Check if a data source has registered config
+config = CloudConfig.get_config("sentinel-2-l2a")
+
+if config:
+    print(f"Provider: {config.provider}")
+    print(f"Region: {config.region}")
+    print(f"Requester pays: {config.requester_pays}")
+```
+
+## Built-in Configs
+
+Rasteret pre-registers configs for well-known datasets:
+
+### Sentinel-2 L2A
+```python
+CloudConfig(
+    provider="aws",
+    requester_pays=False,
+    region="us-west-2"
+)
+```
+
+### Landsat Collection 2 Level-2
+```python
+CloudConfig(
+    provider="aws",
+    requester_pays=True,
+    region="us-west-2"
+)
+```
+
+## Notes
+
+- Configs are stored in a class-level registry
+- Collection IDs are case-insensitive
+- URL patterns are applied in order
+- Requester-pays access requires valid AWS credentials
+- Built-in configs are automatically registered at import time

@@ -1,0 +1,203 @@
+---
+title: Index-First Retrieval
+description: Fast geospatial data access through cached metadata and on-demand pixel reads
+---
+
+## Overview
+
+Rasteret introduces **index-first geospatial retrieval**, a pattern that separates metadata operations from pixel data operations to eliminate cold-start overhead when working with cloud-native GeoTIFF collections.
+
+## The Pattern
+
+Index-first retrieval splits geospatial data access into two independent planes:
+
+<CardGroup cols={2}>
+  <Card title="Control Plane" icon="database">
+    Queryable Parquet index containing:
+    - Scene metadata (datetime, cloud cover, footprint)
+    - COG header metadata (tile offsets, byte counts, transforms)
+    - User-defined columns (ML splits, labels, custom attributes)
+  </Card>
+  <Card title="Data Plane" icon="image">
+    On-demand tile reads from original GeoTIFF/COG objects:
+    - Pixel data stays in source files
+    - Concurrent HTTP range requests
+    - No GDAL in the read path
+  </Card>
+</CardGroup>
+
+## Why It's Fast
+
+### The Cold Start Problem
+
+Traditional workflows with GDAL/rasterio re-parse COG headers over HTTP on **every cold start**:
+
+```python
+# Every time this runs, GDAL fetches IFD headers from S3
+import rasterio
+with rasterio.open("s3://sentinel-cogs/scene.tif") as src:
+    data = src.read(window=...)
+```
+
+For a typical ML project:
+- Your colleague did it last week
+- CI did it overnight  
+- PyTorch DataLoader workers do it **every epoch**
+- Each process repeats **millions of redundant HTTP requests**
+
+### Rasteret's Solution
+
+Parse headers **once**, cache them in Parquet:
+
+```python
+import rasteret
+
+# First run: parses COG headers, writes to Parquet cache
+collection = rasteret.build(
+    "earthsearch/sentinel-2-l2a",
+    name="training",
+    bbox=(77.5, 12.9, 77.7, 13.1),
+    date_range=("2024-01-01", "2024-06-30"),
+)
+
+# Subsequent runs: loads in milliseconds from Parquet
+collection = rasteret.build(...)  # instant cache hit
+```
+
+**First run**: Queries STAC API, fetches IFD headers for all matching scenes, writes Parquet index  
+**All subsequent runs**: Reads local Parquet, zero STAC queries, zero header fetches
+
+Pixel reads still fetch from remote COGs, but use cached tile offsets for direct range requests.
+
+## Performance vs GDAL
+
+### Single-Process Benchmarks
+
+Same AOI, same scenes, same DataLoader. TorchGeo path uses recommended GDAL settings for remote COGs:
+
+| Scenario | rasterio/GDAL | Rasteret | Speedup |
+|---|---|---|---|
+| Single AOI, 15 scenes | 9.08s | 1.14s | **8x** |
+| Multi-AOI, 30 scenes | 42.05s | 2.25s | **19x** |
+| Cross-CRS, 12 scenes | 12.47s | 0.59s | **21x** |
+
+<Note>
+Measured on AWS EC2 in us-west-2 (same region as data). Speedup comes from eliminating header re-parsing, not pixel I/O.
+</Note>
+
+### Where the Time Goes
+
+**GDAL/rasterio path**:
+```
+Open file (fetch IFD) ──► Parse TIFF tags ──► Build overviews ──► Read pixels
+   ↑ Repeated for every file, every cold start
+```
+
+**Rasteret path**:
+```
+Load Parquet index ──► Read pixels with cached tile offsets
+   ↑ One-time setup, reused forever
+```
+
+## Comparison to Other Tools
+
+<AccordionGroup>
+  <Accordion title="vs Google Earth Engine">
+    **Earth Engine**: Server-side processing, pre-computed pyramids, proprietary infrastructure
+    
+    **Rasteret**: Client-side processing, works with any COG, open-source, no vendor lock-in
+    
+    Both cache metadata, but Rasteret gives you control over the index (add custom columns, share as Parquet, version with git).
+  </Accordion>
+  
+  <Accordion title="vs STAC + GDAL">
+    **STAC + GDAL**: Query STAC once, but GDAL re-parses IFD headers on every open()
+    
+    **Rasteret**: Query STAC once, cache IFD headers in Parquet, never re-parse
+    
+    STAC gives you discovery; Rasteret extends it with persistent metadata cache.
+  </Accordion>
+  
+  <Accordion title="vs Virtual Raster (VRT)">
+    **VRT**: XML file referencing source rasters, GDAL still parses headers at read time
+    
+    **Rasteret**: Parquet index with pre-parsed headers, zero overhead at read time
+    
+    VRTs are declarative; Rasteret indexes are executable (queryable with Arrow/DuckDB).
+  </Accordion>
+</AccordionGroup>
+
+## Under the Hood
+
+### What Gets Cached
+
+For each scene and band, Rasteret stores:
+
+```python
+# Example: B04 band metadata struct
+{
+  "tile_offsets": [1234567, 2345678, ...],      # byte positions in COG
+  "tile_byte_counts": [65536, 65536, ...],      # compressed tile sizes
+  "tile_width": 512,
+  "tile_height": 512,
+  "dtype": "uint16",
+  "transform": [10.0, 0.0, 300000.0, ...],      # affine georeferencing
+  "width": 10980,
+  "height": 10980,
+  "crs": 32643,
+  "nodata": 0
+}
+```
+
+This is everything needed for a **direct HTTP range request** to fetch a tile:
+
+```python
+# Rasteret's custom I/O (simplified)
+url = asset["href"]
+offset = tile_offsets[tile_index]
+size = tile_byte_counts[tile_index]
+raw_bytes = http_get_range(url, offset, offset + size)
+tile = imagecodecs.jpeg_decode(raw_bytes)  # no GDAL
+```
+
+See `/home/daytona/workspace/source/src/rasteret/fetch/cog.py` for the full implementation.
+
+### Custom I/O Stack
+
+Rasteret replaces GDAL's I/O with:
+
+1. **obstore** (Rust object_store bindings) for authenticated HTTP/S3/Azure reads
+2. **imagecodecs** for JPEG/LZW/Deflate decompression  
+3. **asyncio** for concurrent tile fetches
+
+<Check>
+**Native dtypes preserved**: uint16 stays uint16 in tensors (only xarray conversion promotes to float32 for NaN support)
+</Check>
+
+## Key Takeaways
+
+<CardGroup cols={2}>
+  <Card title="Metadata is Queryable" icon="magnifying-glass">
+    Parquet index is an Arrow dataset — filter with SQL, DuckDB, or Arrow expressions before reading pixels
+  </Card>
+  <Card title="Pixels Stay Remote" icon="cloud">
+    No downloads required. Work with terabytes of imagery while storing only megabytes of metadata
+  </Card>
+  <Card title="Reproducible" icon="rotate">
+    Same Parquet index = same records = same results. Version control your index with git
+  </Card>
+  <Card title="Shareable" icon="share">
+    Export collection as Parquet, share with teammates — they get instant access without rebuilding
+  </Card>
+</CardGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Collections" href="/concepts/collections" icon="layer-group">
+    Learn how Collections wrap the index and provide filtering/export APIs
+  </Card>
+  <Card title="Dataset Catalog" href="/concepts/dataset-catalog" icon="book">
+    Explore built-in datasets ready to use with `rasteret.build()`
+  </Card>
+</CardGroup>

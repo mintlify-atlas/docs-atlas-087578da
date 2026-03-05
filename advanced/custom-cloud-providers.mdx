@@ -1,0 +1,328 @@
+---
+title: "Custom Cloud Providers"
+description: "Implement custom storage backends and credential providers"
+---
+
+## Overview
+
+Rasteret's I/O layer is pluggable. You can implement custom storage backends for:
+
+- Private cloud buckets with custom authentication
+- Non-AWS/Azure/GCS storage (MinIO, Ceph, Wasabi)
+- Mock backends for testing
+- Local caching layers
+
+This guide covers the `StorageBackend` protocol and shows how to integrate with `obstore` credential providers.
+
+## StorageBackend Protocol
+
+Rasteret's COG reader expects a minimal async interface:
+
+```python
+from typing import Protocol
+
+class StorageBackend(Protocol):
+    """Minimal protocol for range-based reads from cloud storage.
+    
+    Implement this to plug in a custom I/O backend (e.g. obstore,
+    fsspec, or a mocked reader for tests).
+    """
+    
+    async def get_range(self, url: str, start: int, length: int) -> bytes:
+        """Fetch a single byte range from *url*."""
+        ...
+    
+    async def get_ranges(
+        self, url: str, ranges: list[tuple[int, int]]
+    ) -> list[bytes]:
+        """Fetch multiple byte ranges from *url* in a single batch."""
+        ...
+```
+
+From `src/rasteret/cloud.py:62-74`, this protocol is runtime-checkable and used throughout the fetch pipeline.
+
+## Example: Custom MinIO Backend
+
+For a private MinIO instance:
+
+```python
+import obstore as obs
+from rasteret.cloud import StorageBackend
+
+class MinIOBackend:
+    """StorageBackend for MinIO-compatible object storage."""
+    
+    def __init__(self, endpoint: str, access_key: str, secret_key: str, bucket: str):
+        # Configure obstore S3Store with custom endpoint
+        self._store = obs.S3Store.from_url(
+            f"s3://{bucket}",
+            config=obs.ClientConfig(
+                allow_http=True,  # MinIO often runs on HTTP in dev
+            ),
+            options={
+                "endpoint": endpoint,
+                "access_key_id": access_key,
+                "secret_access_key": secret_key,
+            },
+        )
+        self._bucket = bucket
+    
+    def _resolve_path(self, url: str) -> str:
+        """Strip s3:// prefix to get object key."""
+        if url.startswith(f"s3://{self._bucket}/"):
+            return url[len(f"s3://{self._bucket}/"):]
+        return url
+    
+    async def get_range(self, url: str, start: int, length: int) -> bytes:
+        path = self._resolve_path(url)
+        buf = await obs.get_range_async(
+            self._store, path, start=start, length=length
+        )
+        return bytes(buf)
+    
+    async def get_ranges(
+        self, url: str, ranges: list[tuple[int, int]]
+    ) -> list[bytes]:
+        path = self._resolve_path(url)
+        starts, lengths = zip(*ranges)
+        buffers = await obs.get_ranges_async(
+            self._store,
+            path,
+            starts=list(starts),
+            lengths=list(lengths),
+        )
+        return [bytes(b) for b in buffers]
+
+# Usage
+backend = MinIOBackend(
+    endpoint="http://localhost:9000",
+    access_key="minioadmin",
+    secret_key="minioadmin",
+    bucket="my-cogs",
+)
+
+array = collection.get_numpy(
+    geometries=bbox,
+    bands=["B04", "B03", "B02"],
+    backend=backend,
+)
+```
+
+## ObstoreBackend Wrapper
+
+Rasteret provides `ObstoreBackend` (from `src/rasteret/cloud.py:77-130`) to wrap any `obstore` store:
+
+```python
+from rasteret.cloud import ObstoreBackend
+import obstore as obs
+
+# HTTP store with custom headers
+http_store = obs.HTTPStore.from_url(
+    "https://my-cdn.example.com/",
+    client_options={"default_content_type": "image/tiff"},
+)
+
+backend = ObstoreBackend(
+    store=http_store,
+    url_prefix="https://my-cdn.example.com/",
+)
+
+collection = rasteret.build_from_table(
+    "s3://my-bucket/items.parquet",
+    name="custom_backend",
+    backend=backend,
+    enrich_cog=True,
+)
+```
+
+## CloudConfig: URL Rewriting
+
+For collections that expose HTTP URLs but prefer S3 direct access:
+
+```python
+from rasteret import CloudConfig
+
+# Register URL rewrite patterns
+CloudConfig.register(
+    "my-collection",
+    CloudConfig(
+        provider="aws",
+        requester_pays=True,
+        region="eu-central-1",
+        url_patterns={
+            "https://my-cdn.example.com/cogs/": "s3://my-private-bucket/cogs/",
+        },
+    ),
+)
+
+# URLs are rewritten during enrichment and read
+collection = rasteret.build(
+    "my-collection",
+    name="test",
+    bbox=bbox,
+    date_range=date_range,
+)
+```
+
+From `src/rasteret/cloud.py:132-142`, `rewrite_url()` applies these patterns before creating storage backends.
+
+## Credential Providers with create_backend
+
+For auth-required datasets, use `rasteret.create_backend()` with an `obstore` credential provider:
+
+### Planetary Computer
+
+```python
+from obstore.auth.planetary_computer import PlanetaryComputerCredentialProvider
+
+pc_provider = PlanetaryComputerCredentialProvider(
+    "https://planetarycomputer.microsoft.com/api/sas/v1/token"
+)
+
+backend = rasteret.create_backend(
+    credential_provider=pc_provider,
+)
+
+collection = rasteret.build(
+    "pc/sentinel-2-l2a",
+    name="pc_test",
+    bbox=bbox,
+    date_range=date_range,
+    backend=backend,
+)
+```
+
+### NASA Earthdata
+
+```python
+from obstore.auth.earthdata import NasaEarthdataCredentialProvider
+
+# Requires ~/.netrc with Earthdata credentials
+earthdata_provider = NasaEarthdataCredentialProvider(
+    credentials_url="https://data.lpdaac.earthdatacloud.nasa.gov/s3credentials",
+)
+
+backend = rasteret.create_backend(
+    credential_provider=earthdata_provider,
+    region="us-west-2",  # LP DAAC is in us-west-2
+)
+```
+
+### Custom Credential Provider
+
+Implement the `obstore` credential provider protocol:
+
+```python
+import obstore as obs
+import requests
+
+class CustomCredentialProvider:
+    """Fetch STS credentials from a custom endpoint."""
+    
+    def __init__(self, token_url: str, api_key: str):
+        self._token_url = token_url
+        self._api_key = api_key
+    
+    def fetch_credentials(self) -> dict:
+        """Return dict with AccessKeyId, SecretAccessKey, SessionToken."""
+        response = requests.post(
+            self._token_url,
+            headers={"Authorization": f"Bearer {self._api_key}"},
+            timeout=10,
+        )
+        response.raise_for_status()
+        creds = response.json()
+        return {
+            "access_key_id": creds["AccessKeyId"],
+            "secret_access_key": creds["SecretAccessKey"],
+            "session_token": creds["SessionToken"],
+        }
+
+provider = CustomCredentialProvider(
+    token_url="https://api.example.com/v1/credentials",
+    api_key="sk_...",
+)
+
+backend = rasteret.create_backend(credential_provider=provider)
+```
+
+## Per-Bucket S3 Configuration
+
+For datasets with assets in multiple buckets:
+
+```python
+from rasteret.cloud import backend_config_from_cloud_config, CloudConfig
+
+cloud_config = CloudConfig(
+    provider="aws",
+    requester_pays=True,
+    region="us-west-2",
+    url_patterns={
+        "https://landsatlook.usgs.gov/data/": "s3://usgs-landsat/",
+    },
+)
+
+# Extract per-bucket overrides
+overrides = backend_config_from_cloud_config(cloud_config)
+# {'s3_overrides': {'usgs-landsat': {'region': 'us-west-2', 'request_payer': 'true'}}}
+
+backend = rasteret.create_backend(
+    default_s3_config={"region": "us-west-2"},
+    cloud_config=cloud_config,
+)
+```
+
+From `src/rasteret/cloud.py:145-188`, `s3_overrides_from_config()` generates per-bucket config dicts.
+
+## Testing with Mock Backends
+
+For unit tests, implement a deterministic mock:
+
+```python
+class MockBackend:
+    """Return synthetic COG-like bytes for tests."""
+    
+    def __init__(self, tile_size: int = 256):
+        self.tile_size = tile_size
+        self._requests = []  # Track requests for assertions
+    
+    async def get_range(self, url: str, start: int, length: int) -> bytes:
+        self._requests.append((url, start, length))
+        return b"\x00" * length  # Return zeros
+    
+    async def get_ranges(
+        self, url: str, ranges: list[tuple[int, int]]
+    ) -> list[bytes]:
+        return [await self.get_range(url, start, length) for start, length in ranges]
+
+# Use in tests
+mock = MockBackend()
+collection.get_numpy(
+    geometries=bbox,
+    bands=["B04"],
+    backend=mock,
+)
+assert len(mock._requests) > 0, "No requests made"
+```
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Use obstore for Production">
+    `obstore` is a Rust-based library with optimized connection pooling and retry logic. Prefer wrapping obstore stores over custom HTTP clients.
+  </Accordion>
+
+  <Accordion title="Handle Presigned URLs">
+    Some STAC APIs return presigned URLs (with `?X-Amz-...` query params). These work transparently with `HTTPStore` but may conflict with S3 credential providers. Use `url_patterns` to avoid double-signing.
+  </Accordion>
+
+  <Accordion title="Batch get_ranges When Possible">
+    Implement `get_ranges()` to fetch multiple byte ranges in a single HTTP request. This reduces latency for multi-tile reads.
+  </Accordion>
+</AccordionGroup>
+
+## Related Resources
+
+- [Cloud Authentication Guide](/guides/cloud-authentication) - Using built-in providers
+- [API: create_backend](/api/backends) - Backend creation API reference
+- [CloudConfig API](/api/cloud-config) - URL rewriting and cloud configuration

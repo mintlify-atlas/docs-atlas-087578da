@@ -1,0 +1,443 @@
+---
+title: Data Analysis
+description: Load pixel data as xarray, NumPy, or GeoDataFrames for analysis and visualization
+---
+
+Once you've built and filtered a Collection, you can load pixel data in the format that fits your workflow. Rasteret supports three output formats: xarray, NumPy, and GeoDataFrames.
+
+## Quick Start: xarray
+
+```python
+import rasteret
+import matplotlib.pyplot as plt
+
+# Build and filter
+collection = rasteret.build(
+    "earthsearch/sentinel-2-l2a",
+    name="madrid",
+    bbox=(-3.75, 40.38, -3.65, 40.48),
+    date_range=("2024-06-01", "2024-06-30"),
+).subset(cloud_cover_lt=10)
+
+# Load pixel data for an AOI
+aoi = (-3.72, 40.40, -3.68, 40.44)  # Smaller bbox
+ds = collection.get_xarray(
+    geometries=aoi,
+    bands=["B04", "B03", "B02"],  # RGB
+)
+
+# Compute NDVI
+ndvi = (ds["B08"] - ds["B04"]) / (ds["B08"] + ds["B04"])
+
+# Plot
+ndvi.plot(cmap="RdYlGn", vmin=-0.5, vmax=1.0)
+plt.title("NDVI - Madrid")
+plt.show()
+```
+
+## xarray: Multi-Band Datasets
+
+The `get_xarray()` method returns an xarray Dataset with one DataArray per band:
+
+```python
+ds = collection.get_xarray(
+    geometries=aoi,
+    bands=["B04", "B03", "B02", "B08"],
+)
+
+print(ds)
+# <xarray.Dataset>
+# Dimensions:      (y: 500, x: 500, time: 3)
+# Coordinates:
+#   * y            (y) float64 ...
+#   * x            (x) float64 ...
+#   * time         (time) datetime64[ns] ...
+#     spatial_ref  int64 32630
+# Data variables:
+#     B04          (time, y, x) uint16 ...
+#     B03          (time, y, x) uint16 ...
+#     B02          (time, y, x) uint16 ...
+#     B08          (time, y, x) uint16 ...
+```
+
+**What you get:**
+- **Coordinates**: `x`, `y` in the native CRS, `time` for temporal stacking
+- **CRS metadata**: Stored in `spatial_ref` (WKT2, PROJJSON, GeoTransform)
+- **Native dtypes**: `uint16` for Sentinel-2, `uint8` for NAIP, etc.
+- **Merged tiles**: All scenes overlapping the AOI are mosaicked and stacked
+
+### Working with xarray
+
+```python
+# Select a single timestep
+first_scene = ds.isel(time=0)
+
+# Subset spatially
+region = ds.sel(x=slice(-3.71, -3.69), y=slice(40.43, 40.41))
+
+# Compute statistics
+mean_red = ds["B04"].mean(dim=["x", "y"])
+print(f"Mean red reflectance per timestep: {mean_red.values}")
+
+# Time-series analysis
+ndvi_ts = (ds["B08"] - ds["B04"]) / (ds["B08"] + ds["B04"])
+mean_ndvi = ndvi_ts.mean(dim=["x", "y"])
+mean_ndvi.plot()
+plt.title("NDVI Time Series")
+plt.show()
+```
+
+### Filtering Before Loading
+
+```python
+# Filter to the clearest scene per month
+from rasteret import Collection
+import pandas as pd
+
+filtered = collection.subset(
+    cloud_cover_lt=5,
+    date_range=("2024-06-01", "2024-06-30"),
+)
+
+ds = filtered.get_xarray(
+    geometries=aoi,
+    bands=["B04", "B03", "B02"],
+)
+```
+
+## NumPy: Fast Array Access
+
+For workflows that need raw arrays (e.g. custom processing, ML inference):
+
+```python
+import numpy as np
+
+# Load as NumPy array
+array = collection.get_numpy(
+    geometries=aoi,
+    bands=["B04", "B03", "B02", "B08"],
+)
+
+print(array.shape)  # (timesteps, channels, height, width)
+print(array.dtype)  # uint16 (Sentinel-2)
+```
+
+**Array dimensions:**
+- Single band: `(timesteps, height, width)`
+- Multiple bands: `(timesteps, channels, height, width)`
+
+### NumPy Use Cases
+
+```python
+# Compute NDVI
+red = array[:, 0, :, :]   # B04
+nir = array[:, 3, :, :]   # B08
+ndvi = (nir - red) / (nir + red + 1e-8)
+
+# Stack timesteps for analysis
+mean_reflectance = array.mean(axis=0)  # Average across time
+
+# Convert to float and normalize
+array_float = array.astype(np.float32) / 10000.0  # Sentinel-2 scale factor
+```
+
+## GeoDataFrames: Vector + Raster
+
+For workflows that combine vector geometries with pixel data:
+
+```python
+import geopandas as gpd
+
+# Load as GeoDataFrame
+gdf = collection.get_gdf(
+    geometries=aoi,
+    bands=["B04", "B03", "B02"],
+)
+
+print(gdf.head())
+#   geometry                        B04             B03             B02
+# 0 POLYGON ((x, y, ...))  array([[...]]) array([[...]]) array([[...]])
+# 1 POLYGON ((x, y, ...))  array([[...]]) array([[...]]) array([[...]])
+```
+
+Each row is a scene, with pixel arrays stored as columns.
+
+### GeoDataFrame Use Cases
+
+```python
+# Compute per-scene statistics
+gdf["mean_red"] = gdf["B04"].apply(lambda arr: arr.mean())
+gdf["std_red"] = gdf["B04"].apply(lambda arr: arr.std())
+
+# Filter by raster properties
+bright_scenes = gdf[gdf["mean_red"] > 2000]
+
+# Save to file
+gdf[["geometry", "mean_red", "std_red"]].to_file("scenes.geojson", driver="GeoJSON")
+```
+
+## Loading Multiple Geometries
+
+You can load pixel data for multiple geometries in one call:
+
+```python
+import geopandas as gpd
+from shapely.geometry import box
+
+# Define AOIs
+aois = [
+    box(-3.72, 40.40, -3.70, 40.42),
+    box(-3.70, 40.42, -3.68, 40.44),
+]
+
+# Load xarray (one dataset with all AOIs merged)
+ds = collection.get_xarray(
+    geometries=aois,
+    bands=["B04", "B03", "B02"],
+)
+
+# Or load from GeoDataFrame
+fields = gpd.read_file("fields.geojson")
+ds = collection.get_xarray(
+    geometries=fields.geometry,
+    bands=["B04", "B03", "B02"],
+)
+```
+
+## Common Analysis Patterns
+
+### NDVI Time Series
+
+```python
+aoi = (-3.72, 40.40, -3.68, 40.44)
+ds = collection.get_xarray(
+    geometries=aoi,
+    bands=["B04", "B08"],
+)
+
+ndvi = (ds["B08"] - ds["B04"]) / (ds["B08"] + ds["B04"])
+mean_ndvi = ndvi.mean(dim=["x", "y"])
+
+# Plot
+import matplotlib.pyplot as plt
+mean_ndvi.plot()
+plt.xlabel("Date")
+plt.ylabel("NDVI")
+plt.title("Mean NDVI Over Time")
+plt.show()
+```
+
+### False Color Composite
+
+```python
+ds = collection.get_xarray(
+    geometries=aoi,
+    bands=["B08", "B04", "B03"],  # NIR, Red, Green
+)
+
+# Select first timestep
+scene = ds.isel(time=0)
+
+# Stack bands for RGB display
+rgb = np.stack([scene["B08"].values, scene["B04"].values, scene["B03"].values], axis=-1)
+
+# Normalize for display
+rgb = np.clip(rgb / 3000, 0, 1)  # Sentinel-2 scale factor
+
+plt.imshow(rgb)
+plt.title("False Color (NIR-R-G)")
+plt.axis("off")
+plt.show()
+```
+
+### Land Cover Classification
+
+```python
+from sklearn.ensemble import RandomForestClassifier
+import geopandas as gpd
+
+# Load training data
+train_labels = gpd.read_file("training_labels.geojson")
+train_labels["label"] = train_labels["class"].map({"forest": 0, "urban": 1, "water": 2})
+
+# Load pixel data for training polygons
+train_array = collection.get_numpy(
+    geometries=train_labels.geometry,
+    bands=["B04", "B03", "B02", "B08", "B11", "B12"],
+)
+
+# Flatten for sklearn
+X = train_array.reshape(train_array.shape[0], -1)  # (samples, features)
+y = train_labels["label"].values
+
+# Train classifier
+clf = RandomForestClassifier(n_estimators=100)
+clf.fit(X, y)
+
+# Predict on full scene
+scene_array = collection.get_numpy(
+    geometries=aoi,
+    bands=["B04", "B03", "B02", "B08", "B11", "B12"],
+)
+predictions = clf.predict(scene_array.reshape(-1, scene_array.shape[-1]))
+prediction_map = predictions.reshape(scene_array.shape[1:3])
+
+plt.imshow(prediction_map, cmap="tab10")
+plt.title("Land Cover Classification")
+plt.show()
+```
+
+### Change Detection
+
+```python
+# Load two time periods
+early = collection.subset(date_range=("2024-01-01", "2024-03-31")).get_xarray(
+    geometries=aoi,
+    bands=["B04", "B08"],
+)
+
+late = collection.subset(date_range=("2024-06-01", "2024-08-31")).get_xarray(
+    geometries=aoi,
+    bands=["B04", "B08"],
+)
+
+# Compute NDVI for each period
+ndvi_early = (early["B08"] - early["B04"]) / (early["B08"] + early["B04"])
+ndvi_late = (late["B08"] - late["B04"]) / (late["B08"] + late["B04"])
+
+# Mean NDVI per period
+ndvi_early_mean = ndvi_early.mean(dim="time")
+ndvi_late_mean = ndvi_late.mean(dim="time")
+
+# Difference
+ndvi_change = ndvi_late_mean - ndvi_early_mean
+
+ndvi_change.plot(cmap="RdBu", center=0)
+plt.title("NDVI Change (Late - Early 2024)")
+plt.show()
+```
+
+## CRS and Reprojection
+
+### Target CRS
+
+By default, Rasteret uses the most common CRS in the filtered Collection. To force a specific CRS:
+
+```python
+# Reproject to UTM zone 30N
+ds = collection.get_xarray(
+    geometries=aoi,
+    bands=["B04", "B03", "B02"],
+    target_crs=32630,  # EPSG:32630
+)
+```
+
+### Inspecting CRS
+
+```python
+ds = collection.get_xarray(geometries=aoi, bands=["B04"])
+print(ds.spatial_ref.attrs)  # WKT2, PROJJSON, GeoTransform
+```
+
+## Performance Tuning
+
+### Concurrency
+
+```python
+# Increase concurrent COG fetches
+ds = collection.get_xarray(
+    geometries=aoi,
+    bands=["B04", "B03", "B02"],
+    max_concurrent=200,  # Default is 50
+)
+```
+
+### Filtering Before Loading
+
+Always filter Collections before loading pixels to minimize data transfer:
+
+```python
+# Bad: Load all scenes, then filter
+ds = collection.get_xarray(geometries=aoi, bands=["B04"])
+filtered = ds.where(ds["B04"] > 2000)
+
+# Good: Filter Collection first
+filtered = collection.subset(cloud_cover_lt=10)
+ds = filtered.get_xarray(geometries=aoi, bands=["B04"])
+```
+
+### Small AOIs
+
+For very small AOIs (< 1 km²), consider using NumPy instead of xarray to avoid overhead:
+
+```python
+array = collection.get_numpy(geometries=aoi, bands=["B04"])
+```
+
+## Authentication for Private Data
+
+For datasets requiring credentials, create a backend:
+
+```python
+import rasteret
+from obstore.auth.planetary_computer import PlanetaryComputerCredentialProvider
+
+backend = rasteret.create_backend(
+    credential_provider=PlanetaryComputerCredentialProvider(
+        "https://planetarycomputer.microsoft.com/api/sas/v1/token"
+    ),
+)
+
+# Pass backend to get_xarray, get_numpy, or get_gdf
+ds = collection.get_xarray(
+    geometries=aoi,
+    bands=["B04", "B03", "B02"],
+    backend=backend,
+)
+```
+
+See the [Cloud Authentication guide](/guides/cloud-authentication) for details.
+
+## Real-World Example: Multi-Temporal NDVI
+
+See `/home/daytona/workspace/source/examples/landsat_xarray.py:1` for a complete example loading Landsat data and computing NDVI.
+
+```python
+import rasteret
+import matplotlib.pyplot as plt
+
+# Build Collection (requester-pays, needs AWS credentials)
+collection = rasteret.build(
+    "earthsearch/landsat-c2-l2",
+    name="landsat-ndvi",
+    bbox=(11.3, 48.1, 11.5, 48.3),
+    date_range=("2024-01-01", "2024-06-30"),
+)
+
+# Filter to clear scenes
+filtered = collection.subset(cloud_cover_lt=10)
+
+# Load pixel data
+aoi = (11.35, 48.15, 11.45, 48.25)
+ds = filtered.get_xarray(
+    geometries=aoi,
+    bands=["B4", "B5"],  # Red, NIR
+)
+
+# Compute NDVI
+ndvi = (ds["B5"] - ds["B4"]) / (ds["B5"] + ds["B4"])
+
+# Plot time series
+mean_ndvi = ndvi.mean(dim=["x", "y"])
+mean_ndvi.plot()
+plt.xlabel("Date")
+plt.ylabel("NDVI")
+plt.title("Landsat NDVI Time Series")
+plt.show()
+```
+
+## Next Steps
+
+- [ML Training](/guides/ml-training) - Use loaded data with TorchGeo
+- [Filtering & Queries](/guides/filtering-queries) - Refine Collections before loading
+- [Custom Datasets](/guides/custom-datasets) - Register your own analysis-ready datasets

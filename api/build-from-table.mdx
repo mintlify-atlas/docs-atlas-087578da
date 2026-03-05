@@ -1,0 +1,180 @@
+---
+title: 'rasteret.build_from_table()'
+description: 'Build a Collection from an external Parquet/GeoParquet record table'
+---
+
+## Function Signature
+
+```python
+rasteret.build_from_table(
+    path: str | Path | pa.Table | pads.Dataset,
+    *,
+    name: str = "",
+    data_source: str = "",
+    workspace_dir: str | Path | None = None,
+    column_map: dict[str, str] | None = None,
+    href_column: str | None = None,
+    band_index_map: dict[str, int] | None = None,
+    url_rewrite_patterns: dict[str, str] | None = None,
+    filesystem: Any | None = None,
+    columns: list[str] | None = None,
+    filter_expr: Any | None = None,
+    enrich_cog: bool = False,
+    band_codes: list[str] | None = None,
+    cloud_config: Any = None,
+    max_concurrent: int = 300,
+    force: bool = False,
+    backend: StorageBackend | None = None,
+) -> Collection
+```
+
+## Description
+
+Build a Collection from an external Parquet/GeoParquet record table. A record table is a Parquet dataset where each row is a raster item (satellite scene, drone image, derived product, etc.) with at minimum `id`, `datetime`, `geometry`, `assets`, or columns that can be normalized into them via `column_map` and `href_column`.
+
+This is the heavy ingest path: it can normalize schema and optionally enrich COG headers. For in-memory tables that are already read-ready, use `as_collection()`.
+
+When `enrich_cog=True`, COG headers are parsed from the asset URLs and cached as `{band}_metadata` struct columns in the Parquet index, enabling fast tiled reads and TorchGeo integration.
+
+## Parameters
+
+<ParamField path="path" type="str | Path | pa.Table | pads.Dataset" required>
+  Path/URI to a Parquet/GeoParquet file or dataset directory, **or** an in-memory Arrow object (`pyarrow.Table` or `pyarrow.dataset.Dataset`).
+</ParamField>
+
+<ParamField path="name" type="str" default="">
+  Optional collection name. When given without *workspace_dir*, the collection is cached in the default workspace.
+</ParamField>
+
+<ParamField path="data_source" type="str" default="">
+  Data source identifier for band mapping and URL policy.
+</ParamField>
+
+<ParamField path="workspace_dir" type="str | Path">
+  Persist the collection as partitioned Parquet at this path. Defaults to `~/rasteret_workspace/{name}_records/` when *name* is provided.
+</ParamField>
+
+<ParamField path="column_map" type="dict[str, str]">
+  `{source_name: contract_name}` alias map. Source columns are preserved; contract-name columns are added as zero-copy aliases.
+</ParamField>
+
+<ParamField path="href_column" type="str">
+  Column containing COG URLs. When set and `assets` is absent after aliasing, the normalization layer constructs the `assets` struct from this column and `band_index_map`.
+</ParamField>
+
+<ParamField path="band_index_map" type="dict[str, int]">
+  `{band_code: sample_index}` for multi-band COGs.
+</ParamField>
+
+<ParamField path="url_rewrite_patterns" type="dict[str, str]">
+  `{source_prefix: target_prefix}` for URL rewriting during assets construction.
+</ParamField>
+
+<ParamField path="filesystem" type="pyarrow.fs.FileSystem">
+  PyArrow filesystem for reading remote URIs (e.g., `S3FileSystem(anonymous=True)`).
+</ParamField>
+
+<ParamField path="columns" type="list[str]">
+  Scan-time column projection.
+</ParamField>
+
+<ParamField path="filter_expr" type="pyarrow.dataset.Expression">
+  Scan-time predicate pushdown.
+</ParamField>
+
+<ParamField path="enrich_cog" type="bool" default="False">
+  Parse COG headers and add per-band metadata columns.
+</ParamField>
+
+<ParamField path="band_codes" type="list[str]">
+  Bands to enrich. Defaults to all bands in `assets`.
+</ParamField>
+
+<ParamField path="cloud_config" type="CloudConfig">
+  Cloud configuration for URL rewriting.
+</ParamField>
+
+<ParamField path="max_concurrent" type="int" default="300">
+  Maximum concurrent HTTP connections for COG header parsing.
+</ParamField>
+
+<ParamField path="force" type="bool" default="False">
+  Rebuild even if a cached collection already exists at the resolved workspace path.
+</ParamField>
+
+<ParamField path="backend" type="StorageBackend">
+  I/O backend for authenticated range reads during COG header parsing. See `create_backend()`.
+</ParamField>
+
+## Returns
+
+<ResponseField name="collection" type="Collection">
+  A Collection object ready for spatial queries and pixel reads.
+</ResponseField>
+
+## Usage Example
+
+```python
+import rasteret
+import pyarrow.dataset as pads
+
+# Build from a GeoParquet file
+collection = rasteret.build_from_table(
+    "s3://example-bucket/records.parquet",
+    name="custom-dataset",
+    data_source="custom",
+    enrich_cog=True,
+)
+
+# Build with column mapping
+collection = rasteret.build_from_table(
+    "/path/to/table.parquet",
+    name="mapped-dataset",
+    column_map={
+        "scene_id": "id",
+        "capture_date": "datetime",
+        "footprint": "geometry",
+    },
+    href_column="image_url",
+    band_index_map={"R": 0, "G": 1, "B": 2},
+    enrich_cog=True,
+)
+
+# Build with filtering and enrichment
+filter_expr = (
+    (pads.field("year") == 2024) &
+    (pads.field("cloud_cover") < 10)
+)
+
+collection = rasteret.build_from_table(
+    "s3://bucket/large-dataset/",
+    name="filtered-2024",
+    filter_expr=filter_expr,
+    enrich_cog=True,
+    band_codes=["B04", "B03", "B02"],
+    max_concurrent=50,
+)
+
+# Build from in-memory Arrow table
+import pyarrow as pa
+
+table = pa.table({
+    "id": ["scene1", "scene2"],
+    "datetime": pa.array(["2024-01-01", "2024-01-02"], type=pa.timestamp("us")),
+    "geometry": [...],  # WKB binary
+    "assets": [...],  # struct array
+})
+
+collection = rasteret.build_from_table(
+    table,
+    name="in-memory",
+    data_source="custom",
+)
+```
+
+## Related Functions
+
+- [build()](/api/build) - Build from a registered dataset
+- [build_from_stac()](/api/build-from-stac) - Build directly from STAC API
+- [as_collection()](/api/as-collection) - Wrap an in-memory Arrow object without enrichment
+- [Collection](/api/collection) - Collection class reference

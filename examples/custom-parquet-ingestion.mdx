@@ -1,0 +1,376 @@
+---
+title: Custom Parquet Ingestion
+description: Import any Parquet file with COG URLs into Rasteret collections
+icon: file-import
+---
+
+This example shows how to build Rasteret collections from any Parquet file containing COG URLs. Works with Source Cooperative exports, STAC GeoParquet, or custom Parquet files.
+
+## Overview
+
+Rasteret can ingest any Parquet file that contains:
+
+- **Required columns**: `id`, `datetime`, `geometry`, `assets`
+- **COG URLs**: In the `assets` column (STAC format) or other columns
+- **Optional metadata**: Cloud cover, spatial bounds, projection info, etc.
+
+We'll demonstrate with:
+
+1. Source Cooperative public data (no credentials)
+2. Custom column mapping
+3. Predicate pushdown for filtering
+4. Building collections from remote S3 Parquet
+
+## Prerequisites
+
+```bash
+pip install rasteret
+```
+
+## Example 1: Source Cooperative (Maxar Open Data)
+
+Source Cooperative hosts public geospatial datasets as GeoParquet with COG URLs.
+
+```python
+import rasteret
+import pyarrow.dataset as ds
+
+# Maxar Open Data on Source Cooperative (public, no credentials)
+manifest_url = "s3://us-west-2.opendata.source.coop/maxar/maxar-opendata/maxar-opendata.parquet"
+
+# Build collection directly from remote Parquet
+collection = rasteret.build_from_table(
+    manifest_url,
+    name="maxar-opendata",
+    data_source="maxar-opendata",
+)
+
+count = collection.dataset.count_rows() if collection.dataset is not None else 0
+print(f"Collection: {collection.name}")
+print(f"Rows: {count}")
+print(f"Columns: {collection.dataset.schema.names if collection.dataset else []}")
+```
+
+**Setup:**
+```bash
+# Set environment variable for public S3 access (no credentials)
+export AWS_NO_SIGN_REQUEST=YES
+```
+
+**Output:**
+```
+Collection: maxar-opendata
+Rows: 12847
+Columns: ['id', 'datetime', 'geometry', 'assets', 'collection', 'proj:epsg', 'eo:cloud_cover', ...]
+```
+
+## Example 2: Column Projection and Filtering
+
+Use PyArrow's pushdown optimizations to filter and project columns at scan time:
+
+```python
+import pyarrow.dataset as ds
+
+# Step 1: Inspect remote Parquet schema
+remote_dataset = ds.dataset(manifest_url, format="parquet")
+print(f"Available columns: {remote_dataset.schema.names}")
+
+# Verify required columns exist
+available = set(remote_dataset.schema.names)
+required = {"id", "datetime", "geometry", "assets"}
+missing = required - available
+if missing:
+    raise ValueError(f"Missing required columns: {sorted(missing)}")
+
+# Step 2: Project to relevant columns only
+projected_columns = [
+    column
+    for column in [
+        "id",
+        "datetime",
+        "geometry",
+        "assets",
+        "collection",
+        "proj:epsg",
+        "eo:cloud_cover",
+    ]
+    if column in available
+]
+
+# Step 3: Add filter for cloud cover < 20%
+filter_expr = None
+if "eo:cloud_cover" in available:
+    filter_expr = ds.field("eo:cloud_cover") < 20
+
+# Step 4: Build collection with pushdown
+collection = rasteret.build_from_table(
+    manifest_url,
+    name="maxar-low-cloud",
+    data_source="maxar-opendata",
+    columns=projected_columns,  # Projection pushdown
+    filter_expr=filter_expr,     # Predicate pushdown
+)
+
+print(f"Filtered to {collection.dataset.count_rows()} rows with cloud < 20%")
+```
+
+**Output:**
+```
+Filtered to 8234 rows with cloud < 20%
+```
+
+## Example 3: Custom Column Mapping
+
+If your Parquet uses different column names, provide a `column_map`:
+
+```python
+import rasteret
+
+# Your custom Parquet with non-standard column names
+custom_parquet = "/data/my_scenes.parquet"
+
+# Map your columns to Rasteret's expected names
+column_map = {
+    "scene_id": "id",              # Your ID column -> 'id'
+    "capture_date": "datetime",    # Your date column -> 'datetime'
+    "geom": "geometry",             # Your geometry column -> 'geometry'
+    "image_urls": "assets",        # Your URL column -> 'assets'
+}
+
+collection = rasteret.build_from_table(
+    custom_parquet,
+    name="my-custom-data",
+    data_source="custom-source",
+    column_map=column_map,
+)
+
+print(f"Built collection: {collection.name}")
+print(f"Rows: {collection.dataset.count_rows()}")
+```
+
+## Example 4: CLI for Quick Imports
+
+Use the CLI `collections import` command:
+
+```bash
+# Import from S3 (Source Cooperative)
+export AWS_NO_SIGN_REQUEST=YES
+rasteret collections import maxar \
+  --record-table s3://us-west-2.opendata.source.coop/maxar/maxar-opendata/maxar-opendata.parquet \
+  --data-source maxar-opendata
+
+# Check imported collection
+rasteret collections info maxar
+```
+
+**With filtering:**
+
+```bash
+# CLI doesn't support filter_expr directly, but you can:
+# 1. Import full dataset
+# 2. Filter in Python via collection.subset()
+```
+
+## Example 5: Materialize to Local Workspace
+
+Save the filtered collection locally for faster repeated access:
+
+```python
+import rasteret
+from pathlib import Path
+
+workspace = Path.home() / "rasteret_workspace"
+manifest_url = "s3://us-west-2.opendata.source.coop/maxar/maxar-opendata/maxar-opendata.parquet"
+
+# Build and materialize locally
+collection = rasteret.build_from_table(
+    manifest_url,
+    name="maxar-low-cloud",
+    data_source="maxar-opendata",
+    columns=["id", "datetime", "geometry", "assets", "eo:cloud_cover"],
+    filter_expr=ds.field("eo:cloud_cover") < 20,
+    workspace_dir=workspace,  # Materialize locally
+)
+
+print(f"Materialized to: {workspace / 'maxar-low-cloud_records'}")
+
+# Subsequent loads are instant (reads from local Parquet)
+reloaded = rasteret.load(
+    workspace / "maxar-low-cloud_records",
+    name="maxar-low-cloud",
+)
+print(f"Reloaded: {reloaded.dataset.count_rows()} rows")
+```
+
+**Output:**
+```
+Materialized to: /home/user/rasteret_workspace/maxar-low-cloud_records
+Reloaded: 8234 rows
+```
+
+## Example 6: AEF (AI Earth Foundation) Embeddings
+
+For advanced use cases like querying AEF embeddings with DuckDB:
+
+```python
+import duckdb
+import rasteret
+
+# Query AEF index with DuckDB
+INDEX_URI = "https://data.source.coop/tge-labs/aef/v1/annual/aef_index.parquet"
+con = duckdb.connect()
+
+filtered = con.execute(
+    """
+    SELECT *
+    FROM read_parquet(?)
+    WHERE year = 2023
+      AND utm_zone = '32N'
+      AND wgs84_east >= 11.3 AND wgs84_west <= 11.5
+    LIMIT 10
+    """,
+    [INDEX_URI],
+).fetch_arrow_table()  # Zero-copy DuckDB → PyArrow
+
+print(f"Filtered to {filtered.num_rows} tiles")
+
+# Build collection with custom schema mapping
+collection = rasteret.build_from_table(
+    filtered,  # Arrow table, no disk round-trip
+    name="aef-duckdb-example",
+    column_map={
+        "fid": "id",
+        "geom": "geometry",
+        "year": "datetime",
+    },
+    href_column="path",  # COG URL column
+    band_index_map={f"A{i:02d}": i for i in range(64)},  # Band indices
+    url_rewrite_patterns={
+        "s3://us-west-2.opendata.source.coop/": "https://data.source.coop/",
+    },
+    enrich_cog=True,
+    band_codes=["A00", "A01", "A31", "A63"],
+)
+
+print(f"Collection rows: {collection.dataset.count_rows()}")
+```
+
+**Output:**
+```
+Filtered to 10 tiles
+Collection rows: 10
+```
+
+See [`aef_duckdb_query.py`](https://github.com/TerraFloww/rasteret/blob/main/examples/aef_duckdb_query.py) for the complete example.
+
+## Required Parquet Schema
+
+Your Parquet must contain (after column mapping):
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | string | Unique scene identifier |
+| `datetime` | timestamp/string | Scene capture time |
+| `geometry` | WKB binary | WGS84 geometry (point/polygon) |
+| `assets` | struct/map | STAC assets with COG URLs |
+
+**Optional but recommended:**
+
+- `proj:epsg` - Projection EPSG code
+- `eo:cloud_cover` - Cloud cover percentage
+- `bbox_minx`, `bbox_miny`, `bbox_maxx`, `bbox_maxy` - Bounding box
+
+## Parquet Sources
+
+### Source Cooperative
+
+Public datasets with no credentials required:
+
+```bash
+export AWS_NO_SIGN_REQUEST=YES
+```
+
+- Maxar Open Data: `s3://us-west-2.opendata.source.coop/maxar/maxar-opendata/maxar-opendata.parquet`
+- AEF Index: `https://data.source.coop/tge-labs/aef/v1/annual/aef_index.parquet`
+
+### STAC GeoParquet
+
+Many STAC catalogs publish GeoParquet exports:
+
+- Element 84 Earth Search: Check their exports page
+- Microsoft Planetary Computer: GeoParquet snapshots
+
+### Custom Parquet
+
+Export your own STAC Items to Parquet:
+
+```python
+import pystac
+import pyarrow as pa
+import pyarrow.parquet as pq
+from shapely.geometry import shape
+import shapely
+
+# Example: Export STAC Items to Parquet
+items = [...]  # Your STAC Items
+
+rows = []
+for item in items:
+    rows.append({
+        "id": item.id,
+        "datetime": item.datetime,
+        "geometry": shapely.to_wkb(shape(item.geometry)),
+        "assets": item.assets,  # Serialize as JSON or struct
+        "eo:cloud_cover": item.properties.get("eo:cloud_cover"),
+    })
+
+table = pa.table(rows)
+pq.write_table(table, "my_stac_items.parquet")
+```
+
+## CLI Reference
+
+```bash
+# Import remote Parquet
+rasteret collections import my-collection \
+  --record-table s3://bucket/path/data.parquet \
+  --data-source my-source
+
+# With column mapping (JSON)
+rasteret collections import my-collection \
+  --record-table /data/scenes.parquet \
+  --column-map '{"scene_id":"id","capture_date":"datetime"}'
+
+# With column projection
+rasteret collections import my-collection \
+  --record-table /data/scenes.parquet \
+  --columns "id,datetime,geometry,assets,cloud_cover"
+
+# Check imported collection
+rasteret collections info my-collection
+```
+
+## Key Features
+
+- **Remote reading**: Scan Parquet directly from S3/GCS/HTTPS
+- **Pushdown optimizations**: Column projection and predicate pushdown
+- **Zero-copy Arrow**: DuckDB/Polars → PyArrow → Rasteret
+- **Column mapping**: Adapt any schema to Rasteret's contract
+- **Materialization**: Save filtered results locally
+
+## Performance Tips
+
+1. **Use projection**: Only read columns you need with `columns=`
+2. **Filter early**: Use `filter_expr=` for predicate pushdown
+3. **Materialize**: Save filtered results to avoid re-scanning
+4. **Partition-aware**: Use Parquet partitioning (year/month) for faster queries
+
+## Next Steps
+
+- [CLI Reference](/api/cli) - Complete CLI documentation
+- [Sentinel-2 ML Training](/examples/sentinel-2-ml) - Train models with TorchGeo
+- [Multi-Source Training](/examples/multi-source-training) - Major TOM-style collections
+
+## Complete Script
+
+Full example: [`build_collection_from_parquet.py`](https://github.com/TerraFloww/rasteret/blob/main/examples/build_collection_from_parquet.py)

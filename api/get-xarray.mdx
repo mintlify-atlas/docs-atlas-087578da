@@ -1,0 +1,176 @@
+---
+title: Collection.get_xarray()
+description: Load raster data into xarray Datasets with CF-compliant metadata
+---
+
+## Method Signature
+
+```python
+Collection.get_xarray(
+    geometries,
+    bands,
+    *,
+    max_concurrent=50,
+    cloud_config=None,
+    data_source=None,
+    backend=None,
+    target_crs=None,
+    **filters
+)
+```
+
+Load selected bands into an xarray Dataset with coordinate information and CF-compliant spatial metadata.
+
+## Parameters
+
+<ParamField path="geometries" type="bbox tuple, pa.Array, Shapely, WKB bytes, or GeoJSON dict" required>
+  Area(s) of interest to load. Accepts `(minx, miny, maxx, maxy)` bbox tuples, Arrow arrays (e.g. from GeoParquet), Shapely objects, raw WKB bytes, or GeoJSON dicts.
+</ParamField>
+
+<ParamField path="bands" type="list of str" required>
+  Band codes to load (e.g. `["B04", "B03", "B02"]`).
+</ParamField>
+
+<ParamField path="max_concurrent" type="int" default="50">
+  Maximum concurrent HTTP requests for fetching raster tiles.
+</ParamField>
+
+<ParamField path="cloud_config" type="CloudConfig">
+  Cloud configuration for URL rewriting and authenticated access.
+</ParamField>
+
+<ParamField path="data_source" type="str">
+  Override the inferred data source identifier.
+</ParamField>
+
+<ParamField path="backend" type="StorageBackend">
+  Pluggable I/O backend for authenticated range reads. See [create_backend()](/api/backends).
+</ParamField>
+
+<ParamField path="target_crs" type="int">
+  EPSG code to reproject all records to before merging.
+</ParamField>
+
+<ParamField path="**filters" type="kwargs">
+  Additional keyword arguments passed to [subset()](/api/collection#subset) for filtering scenes.
+</ParamField>
+
+## Returns
+
+<ResponseField name="dataset" type="xarray.Dataset">
+  Band arrays in native COG dtype (e.g. `uint16` for Sentinel-2). CRS is encoded via CF conventions with a `spatial_ref` coordinate containing WKT2, PROJJSON, and GeoTransform. Multi-CRS queries are auto-reprojected to the most common CRS.
+</ResponseField>
+
+## Examples
+
+### Basic Load
+
+```python
+import rasteret
+
+collection = rasteret.load("my_collection")
+
+# Load bands into xarray Dataset
+bbox = (-122.5, 37.7, -122.3, 37.9)
+ds = collection.get_xarray(
+    geometries=bbox,
+    bands=["B04", "B03", "B02"]
+)
+
+print(ds)
+# <xarray.Dataset>
+# Dimensions:  (x: 2048, y: 2048, time: 10)
+# Coordinates:
+#   * x        (x) float64 ...
+#   * y        (y) float64 ...
+#   * time     (time) datetime64[ns] ...
+#     spatial_ref int64 0
+# Data variables:
+#     B04      (time, y, x) uint16 ...
+#     B03      (time, y, x) uint16 ...
+#     B02      (time, y, x) uint16 ...
+```
+
+### With Cloud Cover Filter
+
+```python
+# Load only clear scenes
+ds = collection.get_xarray(
+    geometries=bbox,
+    bands=["B08"],
+    cloud_cover_lt=10
+)
+```
+
+### With Date Range
+
+```python
+# Load summer imagery
+ds = collection.get_xarray(
+    geometries=bbox,
+    bands=["B04", "B03", "B02"],
+    date_range=("2023-06-01", "2023-08-31")
+)
+
+# Access temporal dimension
+print(ds.time.values)
+```
+
+### Multiple Geometries
+
+```python
+import geopandas as gpd
+
+# Load data for multiple fields
+fields = gpd.read_file("fields.geojson")
+ds = collection.get_xarray(
+    geometries=fields.geometry,
+    bands=["B08", "B04"]
+)
+```
+
+### With CRS Reprojection
+
+```python
+# Force all data to UTM Zone 10N
+ds = collection.get_xarray(
+    geometries=bbox,
+    bands=["B04"],
+    target_crs=32610
+)
+```
+
+### Using with rioxarray
+
+```python
+import rioxarray
+
+ds = collection.get_xarray(
+    geometries=bbox,
+    bands=["B04", "B03", "B02"]
+)
+
+# Export to GeoTIFF
+ds["B04"].rio.to_raster("red_band.tif")
+```
+
+## Dataset Structure
+
+The returned xarray Dataset includes:
+
+- **Coordinates**:
+  - `x`: Easting/longitude coordinates
+  - `y`: Northing/latitude coordinates  
+  - `time`: Acquisition timestamps
+  - `spatial_ref`: CRS metadata (WKT2, PROJJSON, GeoTransform)
+
+- **Data Variables**: One per requested band, named by band code
+
+- **Attributes**: CF-compliant metadata
+
+## Notes
+
+- Data is in native COG dtype (typically `uint16` for Sentinel-2, Landsat)
+- Multi-CRS collections are automatically reprojected to the most common CRS
+- Use `target_crs` to force a specific output projection
+- Compatible with rioxarray for geospatial operations

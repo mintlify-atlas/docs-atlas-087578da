@@ -1,0 +1,75 @@
+---
+title: 'rasteret.load()'
+description: 'Load a persisted Rasteret Collection artifact from Parquet'
+---
+
+## Function Signature
+
+```python
+rasteret.load(
+    path: str | Path,
+    name: str = "",
+) -> Collection
+```
+
+## Description
+
+Load a persisted Rasteret Collection artifact from Parquet. Use this to reopen a collection previously written by `build()`, `build_from_stac()`, `build_from_table()`, or `Collection.export()`.
+
+If you already have a read-ready Arrow table/dataset in memory, use `as_collection()` instead.
+
+## Parameters
+
+<ParamField path="path" type="str | Path" required>
+  Path to the Parquet file or dataset directory.
+</ParamField>
+
+<ParamField path="name" type="str" default="">
+  Optional name override.
+</ParamField>
+
+## Returns
+
+<ResponseField name="collection" type="Collection">
+  A Collection object loaded from disk, ready for spatial queries and pixel reads.
+</ResponseField>
+
+## Usage Example
+
+```python
+import rasteret
+from pathlib import Path
+
+# Load a collection from the default workspace
+collection = rasteret.load(
+    Path.home() / "rasteret_workspace" / "bay-area-2024_records"
+)
+
+print(f"Loaded {collection.name}")
+print(f"Data source: {collection.data_source}")
+print(f"Date range: {collection.start_date} to {collection.end_date}")
+
+# Load with custom name
+collection = rasteret.load(
+    "/path/to/exported/collection.parquet",
+    name="custom-collection",
+)
+
+# Filter and use
+filtered = collection.subset(
+    cloud_cover_lt=10,
+    date_range=("2024-01-01", "2024-01-31"),
+)
+
+ds = filtered.get_xarray(
+    geometries=aoi,
+    bands=["B04", "B03", "B02"],
+    resolution=10,
+)
+```
+
+## Related Functions
+
+- [build()](/api/build) - Build a new Collection from a registered dataset
+- [as_collection()](/api/as-collection) - Wrap an in-memory Arrow object as a Collection
+- [Collection](/api/collection) - Collection class reference

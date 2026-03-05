@@ -1,0 +1,247 @@
+---
+title: "Multi-Dataset Training"
+description: "Combine multiple collections for diverse ML training pipelines"
+---
+
+## Overview
+
+Rasteret makes it easy to combine multiple satellite collections into unified training pipelines. This guide shows how to:
+
+- Build and merge collections from different data sources
+- Harmonize band names across datasets
+- Create cross-collection training splits
+- Build hybrid datasets (imagery + embeddings, multi-modal sources)
+
+## Building Multiple Collections
+
+Start by building collections for each data source:
+
+```python
+import rasteret
+import pyarrow as pa
+import pyarrow.compute as pc
+
+bbox = (77.55, 13.01, 77.58, 13.08)
+date_range = ("2024-01-01", "2024-06-30")
+
+# Sentinel-2 optical imagery
+s2_collection = rasteret.build(
+    "earthsearch/sentinel-2-l2a",
+    name="s2_bangalore",
+    bbox=bbox,
+    date_range=date_range,
+)
+
+# Landsat for temporal diversity
+landsat_collection = rasteret.build(
+    "earthsearch/landsat-c2-l2",
+    name="landsat_bangalore",
+    bbox=bbox,
+    date_range=date_range,
+)
+
+# Foundation model embeddings
+aef_collection = rasteret.build(
+    "aef/v1-annual",
+    name="aef_bangalore",
+    bbox=bbox,
+    date_range=date_range,
+)
+```
+
+## Merging Collections
+
+### Concatenate with PyArrow
+
+Combine record tables and preserve all metadata columns:
+
+```python
+import pyarrow.concat_tables as concat_tables
+
+# Extract tables
+s2_table = s2_collection.dataset.to_table()
+landsat_table = landsat_collection.dataset.to_table()
+
+# Align schemas by selecting common columns
+common_cols = [
+    "id", "datetime", "geometry", "assets", "scene_bbox",
+    "proj:epsg", "eo:cloud_cover",
+]
+
+# Add source tags
+s2_table = s2_table.append_column(
+    "source", pa.array(["sentinel-2"] * len(s2_table))
+)
+landsat_table = landsat_table.append_column(
+    "source", pa.array(["landsat"] * len(landsat_table))
+)
+
+# Concatenate
+merged_table = pa.concat_tables([
+    s2_table.select(common_cols + ["source"] + 
+                     [c for c in s2_table.schema.names if c.endswith("_metadata")]),
+    landsat_table.select(common_cols + ["source"] + 
+                          [c for c in landsat_table.schema.names if c.endswith("_metadata")]),
+])
+
+# Wrap as a collection
+merged_collection = rasteret.as_collection(
+    merged_table,
+    name="multi_source",
+    data_source="sentinel-2+landsat",
+)
+
+print(f"Combined collection: {merged_collection.dataset.count_rows()} rows")
+```
+
+### Band Harmonization
+
+When combining datasets with different band naming conventions, create a unified band mapping:
+
+```python
+# Sentinel-2 uses B04/B08, Landsat uses B4/B5 for red/NIR
+# Harmonize at read time by subsetting per source
+
+def get_multi_source_data(collection, geometries):
+    """Fetch harmonized RGB+NIR from multiple sources."""
+    s2_subset = collection.subset(source="sentinel-2")
+    landsat_subset = collection.subset(source="landsat")
+    
+    # Fetch with source-specific band codes
+    s2_data = s2_subset.get_numpy(
+        geometries=geometries,
+        bands=["B04", "B03", "B02", "B08"],  # Sentinel-2
+    )
+    
+    landsat_data = landsat_subset.get_numpy(
+        geometries=geometries,
+        bands=["B4", "B3", "B2", "B5"],  # Landsat
+    )
+    
+    # Both are now (N, 4, H, W) with [Red, Green, Blue, NIR]
+    return s2_data, landsat_data
+```
+
+## Cross-Collection Splits
+
+Assign consistent train/val/test splits across all collections:
+
+```python
+import numpy as np
+
+def assign_global_splits(
+    collections: list[rasteret.Collection],
+    train_ratio: float = 0.7,
+    val_ratio: float = 0.15,
+    seed: int = 42,
+) -> list[rasteret.Collection]:
+    """Assign deterministic splits based on geometry hash."""
+    import hashlib
+    
+    split_collections = []
+    for coll in collections:
+        table = coll.dataset.to_table()
+        
+        # Hash geometries for deterministic splits
+        geoms = table.column("geometry").to_pylist()
+        hashes = [int(hashlib.md5(g).hexdigest(), 16) for g in geoms]
+        ratios = [h / (2**128) for h in hashes]  # Normalize to [0, 1]
+        
+        splits = np.where(
+            np.array(ratios) < train_ratio,
+            "train",
+            np.where(
+                np.array(ratios) < train_ratio + val_ratio,
+                "val",
+                "test",
+            ),
+        )
+        
+        table = table.append_column("split", pa.array(splits))
+        split_collections.append(
+            rasteret.as_collection(table, name=coll.name)
+        )
+    
+    return split_collections
+
+# Apply to all collections
+s2_split, landsat_split, aef_split = assign_global_splits([
+    s2_collection, landsat_collection, aef_collection
+])
+```
+
+See `examples/ml_training_with_splits.py` for a complete workflow from `src/rasteret/catalog.py:448`.
+
+## Hybrid Datasets: Imagery + Embeddings
+
+Combine raw imagery with foundation model embeddings:
+
+```python
+from torch.utils.data import Dataset
+
+class HybridDataset(Dataset):
+    """Multi-modal dataset: Sentinel-2 RGB + AlphaEarth embeddings."""
+    
+    def __init__(self, s2_collection, aef_collection, geometries, chip_size=256):
+        self.s2 = s2_collection.to_torchgeo_dataset(
+            bands=["B04", "B03", "B02"],
+            geometries=geometries,
+            chip_size=chip_size,
+        )
+        self.aef = aef_collection.to_torchgeo_dataset(
+            bands=[f"A{i:02d}" for i in range(64)],  # 64 embedding channels
+            geometries=geometries,
+            chip_size=chip_size,
+        )
+    
+    def __len__(self):
+        return len(self.s2)
+    
+    def __getitem__(self, idx):
+        s2_sample = self.s2[idx]
+        aef_sample = self.aef[idx]
+        
+        return {
+            "rgb": s2_sample["image"],     # (3, H, W)
+            "embeddings": aef_sample["image"],  # (64, H, W)
+            "bbox": s2_sample["bbox"],
+        }
+
+# Usage
+hybrid_ds = HybridDataset(
+    s2_split.subset(split="train"),
+    aef_split.subset(split="train"),
+    geometries=bbox,
+)
+```
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Normalize Temporal Resolution">
+    When combining datasets with different revisit times, consider:
+    - Downsampling high-frequency sources to match low-frequency ones
+    - Creating time windows and selecting the closest scene per window
+    - Using date-based partitioning to balance temporal coverage
+  </Accordion>
+
+  <Accordion title="Handle Spatial Misalignment">
+    Different sensors have different native resolutions and grids:
+    - Rasteret reprojects on-the-fly during `get_numpy()`/`get_xarray()`
+    - For training, fix `resolution=` to a common GSD (e.g., 10m)
+    - Use `chip_size` to ensure consistent spatial dimensions
+  </Accordion>
+
+  <Accordion title="Memory Management">
+    Large multi-dataset pipelines can strain RAM:
+    - Use `rasteret.as_collection()` with `pyarrow.dataset.Dataset` for lazy loading
+    - Stream from disk with PyArrow partitioned datasets
+    - Materialize only training split subsets during data loader construction
+  </Accordion>
+</AccordionGroup>
+
+## Related Resources
+
+- [ML Training Guide](/guides/ml-training) - Single-dataset training patterns
+- [Filtering & Queries](/guides/filtering-queries) - Subsetting collections
+- [Custom Datasets](/guides/custom-datasets) - Adding new data sources

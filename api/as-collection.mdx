@@ -1,0 +1,141 @@
+---
+title: 'rasteret.as_collection()'
+description: 'Wrap a read-ready Arrow object as a Collection'
+---
+
+## Function Signature
+
+```python
+rasteret.as_collection(
+    table: pa.Table | pads.Dataset,
+    *,
+    name: str = "",
+    data_source: str = "",
+    description: str = "",
+    start_date: datetime | None = None,
+    end_date: datetime | None = None,
+    require_band_metadata: bool = True,
+) -> Collection
+```
+
+## Description
+
+Wrap a read-ready Arrow object as a Collection. This is the lightweight re-entry path for workflows where you already have a table derived from an existing Collection and want to keep using Rasteret reads without re-running ingest/enrichment.
+
+Unlike `build_from_table()`, this function performs **no** COG enrichment, normalization, or persistence. It validates the read contract and wraps the provided Arrow object as-is.
+
+Use `build_from_table()` for first-time external Parquet ingest.
+
+## Parameters
+
+<ParamField path="table" type="pa.Table | pads.Dataset" required>
+  Arrow object to wrap. `pyarrow.dataset.Dataset` is recommended for large collections to keep scans lazy. Despite the parameter name, both table and dataset inputs are first-class.
+</ParamField>
+
+<ParamField path="name" type="str" default="">
+  Optional collection name.
+</ParamField>
+
+<ParamField path="data_source" type="str" default="">
+  Optional data source identifier. If omitted, Rasteret attempts to infer it from schema metadata or the `collection` column.
+</ParamField>
+
+<ParamField path="description" type="str" default="">
+  Optional collection description.
+</ParamField>
+
+<ParamField path="start_date" type="datetime">
+  Optional temporal start to attach to the Collection object.
+</ParamField>
+
+<ParamField path="end_date" type="datetime">
+  Optional temporal end to attach to the Collection object.
+</ParamField>
+
+<ParamField path="require_band_metadata" type="bool" default="True">
+  When `True` (default), require at least one `*_metadata` column and validate those columns are struct-typed with required COG metadata fields.
+</ParamField>
+
+## Returns
+
+<ResponseField name="collection" type="Collection">
+  A wrapped Collection ready for `get_numpy()`, `get_xarray()`, and `to_torchgeo_dataset()` when the necessary band metadata columns are present.
+</ResponseField>
+
+## Raises
+
+- **TypeError**: If the input is not a `pyarrow.Table` or `pyarrow.dataset.Dataset`.
+- **ValueError**: If required columns are missing or band metadata is invalid.
+- **UserWarning**: If a large in-memory `pyarrow.Table` is provided (>2 GiB or >40% of system RAM).
+
+## Usage Example
+
+```python
+import rasteret
+import pyarrow as pa
+import pyarrow.dataset as pads
+
+# Load an existing collection and filter it
+base_collection = rasteret.load(
+    "~/rasteret_workspace/sentinel2_records"
+)
+
+# Apply filters using PyArrow dataset API
+filtered_dataset = base_collection.dataset.filter(
+    (pads.field("eo:cloud_cover") < 10) &
+    (pads.field("year") == 2024)
+)
+
+# Wrap the filtered dataset as a new Collection
+filtered_collection = rasteret.as_collection(
+    filtered_dataset,
+    name="low-cloud-2024",
+    data_source="sentinel-2-l2a",
+)
+
+print(f"Filtered to {len(filtered_collection)} scenes")
+
+# Use the wrapped collection
+ds = filtered_collection.get_xarray(
+    geometries=aoi,
+    bands=["B04", "B03", "B02"],
+    resolution=10,
+)
+
+# Wrap a table without band metadata (metadata-only workflows)
+table = base_collection.dataset.to_table(
+    columns=["id", "datetime", "geometry", "assets", "scene_bbox"]
+)
+
+metadata_collection = rasteret.as_collection(
+    table,
+    name="metadata-only",
+    require_band_metadata=False,
+)
+
+# Export to GeoDataFrame
+gdf = metadata_collection.get_gdf()
+print(gdf.head())
+```
+
+## Performance Notes
+
+<Warning>
+For large collections (>2 GiB), prefer passing a `pyarrow.dataset.Dataset` instead of a `pyarrow.Table` to keep scans lazy and avoid loading the entire dataset into memory.
+</Warning>
+
+```python
+# Good: Lazy dataset
+dataset = pads.dataset("/path/to/large/collection")
+collection = rasteret.as_collection(dataset)
+
+# Warning: Loads entire table into memory
+table = pads.dataset("/path/to/large/collection").to_table()
+collection = rasteret.as_collection(table)  # May trigger warning
+```
+
+## Related Functions
+
+- [build_from_table()](/api/build-from-table) - Build from external Parquet with normalization/enrichment
+- [load()](/api/load) - Load a persisted Collection
+- [Collection](/api/collection) - Collection class reference

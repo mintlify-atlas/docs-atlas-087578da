@@ -1,80 +1,442 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+title: Quickstart
+description: Build your first Collection and fetch pixels in 5 minutes
 ---
 
-## Get started in three steps
+# Quickstart
 
-Get your documentation site running locally and make your first customization.
-
-### Step 1: Set up your local environment
-
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
-
-### Step 2: Deploy your changes
-
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
-
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
-
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
-
-### Step 3: Go live
-
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
-
-## Next steps
-
-Now that you have your docs running, explore these key features:
-
-<CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
-</CardGroup>
+This guide walks you through the complete Rasteret workflow: building a Collection from STAC, filtering scenes, and fetching pixels in multiple formats.
 
 <Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
+  **Time to complete:** ~5 minutes  
+  **Prerequisites:** Python 3.12+, `rasteret` installed
 </Note>
+
+## Overview
+
+You'll learn how to:
+
+1. Build a Collection from the built-in dataset catalog
+2. Inspect and filter the Collection
+3. Fetch pixels as xarray, NumPy, and GeoPandas
+4. Compute NDVI from the retrieved data
+
+## Setup
+
+First, import Rasteret and define an area of interest:
+
+```python
+from pathlib import Path
+import rasteret
+from shapely.geometry import Polygon
+
+# Define a small AOI over Bengaluru, India
+aoi = Polygon([
+    (77.55, 13.01),
+    (77.58, 13.01),
+    (77.58, 13.08),
+    (77.55, 13.08),
+    (77.55, 13.01),
+])
+```
+
+<Note>
+  Coordinates are in longitude, latitude (EPSG:4326). The polygon defines a ~3.3 km × 7.8 km area.
+</Note>
+
+## Step 1: Build a Collection
+
+`build()` picks a dataset from the catalog, queries STAC, parses COG headers, and caches everything as Parquet:
+
+```python
+collection = rasteret.build(
+    "earthsearch/sentinel-2-l2a",  # Dataset ID from catalog
+    name="bangalore_jan",           # Logical name for this collection
+    bbox=aoi.bounds,                # (minx, miny, maxx, maxy)
+    date_range=("2024-01-01", "2024-01-31"),
+)
+
+print(collection)
+# Output: Collection('bangalore_jan', source='sentinel-2-l2a', bands=13, records=8, crs=32643)
+```
+
+<Steps>
+  <Step title="First Run">
+    Rasteret queries the STAC API, finds matching scenes, parses COG headers for all bands, and writes a Parquet index to `~/rasteret_workspace/bangalore_jan_*/`.
+    
+    **Time:** 3-10 seconds depending on scene count
+  </Step>
+  <Step title="Subsequent Runs">
+    The Parquet index is loaded from disk in milliseconds. No STAC query, no header parsing.
+    
+    **Time:** &lt;100 ms
+  </Step>
+</Steps>
+
+### What Just Happened?
+
+- ✅ Queried Earth Search STAC API for Sentinel-2 L2A scenes
+- ✅ Parsed COG headers for all 13 bands (B01-B12, SCL)
+- ✅ Cached metadata in `~/rasteret_workspace/bangalore_jan_sentinel-2-l2a_2024-01-01_2024-01-31_stac/`
+- ✅ Created a `Collection` object ready for filtering and reads
+
+## Step 2: Inspect the Collection
+
+Explore the Collection's metadata:
+
+```python
+# Basic info
+print(f"Name: {collection.name}")
+print(f"Bands: {collection.bands}")
+print(f"Records: {len(collection)}")
+print(f"CRS: {collection.crs}")
+
+# Output:
+# Name: bangalore_jan
+# Bands: ['B01', 'B02', 'B03', 'B04', 'B05', 'B06', 'B07', 'B08', 'B8A', 'B09', 'B11', 'B12', 'SCL']
+# Records: 8
+# CRS: EPSG:32643
+```
+
+### View Collection as DataFrame
+
+```python
+import pandas as pd
+
+# Convert to pandas for inspection
+df = collection.dataset.to_table().to_pandas()
+print(df[["id", "datetime", "cloud_cover"]].head())
+```
+
+<CodeGroup>
+```python Output
+                                          id            datetime  cloud_cover
+0  S2B_32643_20240103_0_L2A               2024-01-03         12.4
+1  S2A_32643_20240108_0_L2A               2024-01-08         45.2
+2  S2B_32643_20240113_0_L2A               2024-01-13          8.1
+3  S2A_32643_20240118_0_L2A               2024-01-18         67.9
+4  S2B_32643_20240123_0_L2A               2024-01-23          3.2
+```
+</CodeGroup>
+
+## Step 3: Filter Scenes
+
+Filter the Collection without any network calls (pure in-memory filtering):
+
+```python
+# Filter by cloud cover and date
+filtered = collection.subset(
+    cloud_cover_lt=20,
+    date_range=("2024-01-10", "2024-01-31"),
+)
+
+print(f"Original: {len(collection)} scenes")
+print(f"Filtered: {len(filtered)} scenes")
+# Output:
+# Original: 8 scenes
+# Filtered: 3 scenes
+```
+
+<Note>
+  `subset()` returns a new `Collection` object with the filtered dataset. The original Collection is unchanged.
+</Note>
+
+### Available Filters
+
+| Parameter | Description | Example |
+|---|---|---|
+| `cloud_cover_lt` | Maximum cloud cover (%) | `cloud_cover_lt=15` |
+| `date_range` | Temporal window | `date_range=("2024-01", "2024-06")` |
+| `bbox` | Spatial bounds | `bbox=(west, south, east, north)` |
+| `split` | Filter by split column value | `split="train"` |
+| `split_column` | Custom split column name | `split_column="dataset_split"` |
+
+For complex queries, use PyArrow expressions:
+
+```python
+import pyarrow.compute as pc
+import pyarrow.dataset as ds
+
+# Custom filter: cloud cover < 10 OR date after Jan 20
+expr = (
+    (ds.field("cloud_cover") < 10) | 
+    (ds.field("datetime") >= pc.strptime("2024-01-20", "%Y-%m-%d", "us"))
+)
+filtered = collection.where(expr)
+```
+
+## Step 4: Fetch Pixels
+
+Now fetch actual pixel data for your AOI. Rasteret reads only the tiles that intersect your geometry.
+
+### As xarray Dataset
+
+```python
+ds = filtered.get_xarray(
+    geometries=[aoi],
+    bands=["B04", "B08"],  # Red and NIR
+)
+
+print(ds)
+```
+
+<CodeGroup>
+```python Output
+<xarray.Dataset>
+Dimensions:  (scene: 3, y: 867, x: 334)
+Coordinates:
+  * scene    (scene) <U24 'S2B_32643_20240113_0_L2A' ...
+  * y        (y) float64 1.446e+06 1.446e+06 ... 1.437e+06
+  * x        (x) float64 6.593e+05 6.593e+05 ... 6.627e+05
+Data variables:
+    B04      (scene, y, x) uint16 ...
+    B08      (scene, y, x) uint16 ...
+Attributes:
+    crs:      EPSG:32643
+```
+</CodeGroup>
+
+**Features:**
+- Spatial coordinates (x, y) in native CRS
+- Scene dimension for temporal stacking
+- CRS metadata for geospatial operations
+- Lazy evaluation (data loaded on access)
+
+### As NumPy Array
+
+```python
+arr = filtered.get_numpy(
+    geometries=[aoi],
+    bands=["B04", "B08"],
+)
+
+print(f"Shape: {arr.shape}")   # (N, C, H, W)
+print(f"Dtype: {arr.dtype}")   # uint16 (native)
+# Output:
+# Shape: (3, 2, 867, 334)
+# Dtype: uint16
+```
+
+**Shape dimensions:**
+- `N` = number of scenes (3)
+- `C` = number of bands (2: B04, B08)
+- `H` = height in pixels (867)
+- `W` = width in pixels (334)
+
+<Note>
+  Rasteret preserves native dtypes. Sentinel-2 uint16 data stays uint16—no unnecessary float32 promotion unless you use xarray with NaN filling.
+</Note>
+
+### As GeoPandas DataFrame
+
+```python
+gdf = filtered.get_gdf(
+    geometries=[aoi],
+    bands=["B04", "B08"],
+)
+
+print(gdf[["id", "datetime", "B04", "B08"]].head())
+```
+
+<CodeGroup>
+```python Output
+                      id            datetime                                B04  \
+0  S2B_32643_20240113_0_L2A 2024-01-13  [[1234, 1245, ...], [1256, ...]]   
+1  S2A_32643_20240118_0_L2A 2024-01-18  [[1198, 1207, ...], [1221, ...]]   
+2  S2B_32643_20240123_0_L2A 2024-01-23  [[1276, 1289, ...], [1301, ...]]   
+
+                                B08  
+0  [[2145, 2178, ...], [2201, ...]]  
+1  [[2098, 2134, ...], [2156, ...]]  
+2  [[2234, 2267, ...], [2289, ...]]  
+```
+</CodeGroup>
+
+**Use cases:**
+- One row per geometry-scene pair
+- Band arrays stored as columns
+- Join with external metadata
+- Export to GeoPackage or Parquet
+
+## Step 5: Compute NDVI
+
+Now compute NDVI from the fetched data:
+
+<Tabs>
+  <Tab title="xarray">
+    ```python
+    # Convert to float and compute NDVI
+    nir = ds["B08"].astype(float)
+    red = ds["B04"].astype(float)
+    ndvi = (nir - red) / (nir + red)
+    
+    # Plot time series
+    ndvi.mean(dim=["y", "x"]).plot()
+    ```
+  </Tab>
+  <Tab title="NumPy">
+    ```python
+    # Channels follow requested band order: [B04, B08]
+    red = arr[:, 0].astype("float32")
+    nir = arr[:, 1].astype("float32")
+    ndvi = (nir - red) / (nir + red + 1e-6)
+    
+    print(f"Mean NDVI: {ndvi.mean():.3f}")
+    # Output: Mean NDVI: 0.342
+    ```
+  </Tab>
+</Tabs>
+
+## Step 6: Share Your Collection
+
+Collections are portable—export and share with colleagues:
+
+```python
+# Export to a directory
+collection.export("./shared_collections/bangalore_jan/")
+
+# On another machine, load directly
+shared = rasteret.load("./shared_collections/bangalore_jan/")
+print(shared.bands)
+# Output: ['B01', 'B02', ..., 'SCL']
+```
+
+<Note>
+  The exported Parquet files contain all metadata and COG headers. No STAC queries or header parsing needed on the receiving end.
+</Note>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="TorchGeo Integration" icon="fire" href="/integrations/torchgeo">
+    Use Rasteret with PyTorch DataLoader and TorchGeo samplers
+  </Card>
+  <Card title="Build from Parquet" icon="table" href="/guides/building-collections">
+    Ingest custom Parquet tables with COG URLs
+  </Card>
+  <Card title="Dataset Catalog" icon="book" href="/concepts/dataset-catalog">
+    Explore built-in datasets and add your own
+  </Card>
+  <Card title="API Reference" icon="code" href="/api/build">
+    Complete function signatures and parameters
+  </Card>
+</CardGroup>
+
+## Complete Example
+
+Here's the full workflow in one script:
+
+```python quickstart.py
+from pathlib import Path
+import rasteret
+from shapely.geometry import Polygon
+
+# 1. Define AOI
+aoi = Polygon([
+    (77.55, 13.01),
+    (77.58, 13.01),
+    (77.58, 13.08),
+    (77.55, 13.08),
+    (77.55, 13.01),
+])
+
+# 2. Build Collection (cached after first run)
+collection = rasteret.build(
+    "earthsearch/sentinel-2-l2a",
+    name="bangalore_jan",
+    bbox=aoi.bounds,
+    date_range=("2024-01-01", "2024-01-31"),
+)
+
+print(f"Built collection: {collection.name}")
+print(f"Found {len(collection)} scenes")
+
+# 3. Filter by cloud cover
+filtered = collection.subset(cloud_cover_lt=20)
+print(f"After cloud filter: {len(filtered)} scenes")
+
+# 4. Fetch pixels
+ds = filtered.get_xarray(geometries=[aoi], bands=["B04", "B08"])
+arr = filtered.get_numpy(geometries=[aoi], bands=["B04", "B08"])
+gdf = filtered.get_gdf(geometries=[aoi], bands=["B04", "B08"])
+
+# 5. Compute NDVI
+nir = ds["B08"].astype(float)
+red = ds["B04"].astype(float)
+ndvi = (nir - red) / (nir + red)
+
+print(f"Mean NDVI: {ndvi.mean().values:.3f}")
+print(f"NumPy shape: {arr.shape}")
+print(f"GeoPandas rows: {len(gdf)}")
+```
+
+**Run it:**
+
+```bash
+python quickstart.py
+```
+
+<Warning>
+  **Free datasets only:** This example uses Sentinel-2 on Earth Search, which is free and requires no authentication. For requester-pays datasets (Landsat, NAIP), install `rasteret[aws]` and configure AWS credentials.
+</Warning>
+
+## Troubleshooting
+
+### "No scenes found"
+
+Check that your bbox and date_range intersect actual data:
+
+```python
+# Verify bbox format: (minx, miny, maxx, maxy)
+print(aoi.bounds)
+
+# Try a wider date range
+collection = rasteret.build(
+    "earthsearch/sentinel-2-l2a",
+    name="bangalore",
+    bbox=aoi.bounds,
+    date_range=("2023-01-01", "2024-12-31"),  # Full 2 years
+)
+```
+
+### "Collection already exists" when you want to rebuild
+
+Use `force=True` to rebuild:
+
+```python
+collection = rasteret.build(
+    "earthsearch/sentinel-2-l2a",
+    name="bangalore_jan",
+    bbox=aoi.bounds,
+    date_range=("2024-01-01", "2024-01-31"),
+    force=True,  # Rebuild even if cache exists
+)
+```
+
+### Memory issues with large collections
+
+For collections with 1000+ scenes, use PyArrow Dataset (lazy) instead of in-memory tables:
+
+```python
+# Collections use lazy datasets by default
+print(type(collection.dataset))  # <class 'pyarrow.dataset.FileSystemDataset'>
+
+# Avoid calling .to_table() unless necessary
+# ❌ Bad: loads everything into memory
+df = collection.dataset.to_table().to_pandas()
+
+# ✅ Good: lazy evaluation
+ds = collection.get_xarray(geometries=[aoi], bands=["B04"])
+```
+
+## Summary
+
+You've learned:
+
+✅ How to build a Collection from the built-in catalog  
+✅ How to filter scenes without network calls  
+✅ How to fetch pixels in xarray, NumPy, and GeoPandas formats  
+✅ How to compute indices like NDVI  
+✅ How to share Collections as portable Parquet files
+
+Rasteret handles STAC queries, COG header parsing, and parallel tile I/O so you can focus on your analysis or ML pipeline.

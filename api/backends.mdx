@@ -1,0 +1,271 @@
+---
+title: Storage Backends
+description: Configure authenticated cloud storage access
+---
+
+## create_backend()
+
+```python
+from rasteret import create_backend
+
+backend = create_backend(
+    credential_provider=None,
+    cloud_config=None,
+    region=None,
+    default_s3_config=None
+)
+```
+
+Create an I/O backend for authenticated cloud reads. Pass the result as `backend=` to data access methods.
+
+### Parameters
+
+<ParamField path="credential_provider" type="object">
+  An obstore credential provider, e.g. `PlanetaryComputerCredentialProvider`, `NasaEarthdataCredentialProvider`.
+</ParamField>
+
+<ParamField path="cloud_config" type="CloudConfig">
+  Cloud configuration for S3 URL rewriting and per-bucket overrides.
+</ParamField>
+
+<ParamField path="region" type="str">
+  Convenience alias for `default_s3_config={"region": region}`.
+</ParamField>
+
+<ParamField path="default_s3_config" type="dict[str, str]">
+  Default S3Store config applied to all buckets that don't have per-bucket overrides (e.g. `{"region": "us-west-2"}`).
+</ParamField>
+
+### Returns
+
+<ResponseField name="backend" type="StorageBackend">
+  A storage backend instance for use with data access methods.
+</ResponseField>
+
+## StorageBackend Protocol
+
+```python
+class StorageBackend(Protocol):
+    async def get_range(self, url: str, start: int, length: int) -> bytes: ...
+    
+    async def get_ranges(
+        self, url: str, ranges: list[tuple[int, int]]
+    ) -> list[bytes]: ...
+```
+
+Minimal protocol for range-based reads from cloud storage. Implement this to plug in a custom I/O backend (e.g. obstore, fsspec, or a mocked reader for tests).
+
+### Methods
+
+<ParamField path="get_range" type="async method">
+  Fetch a single byte range from a URL.
+  
+  **Parameters:**
+  - `url` (str): Resource URL
+  - `start` (int): Byte offset
+  - `length` (int): Number of bytes to read
+  
+  **Returns:** `bytes`
+</ParamField>
+
+<ParamField path="get_ranges" type="async method">
+  Fetch multiple byte ranges from a URL in a single request.
+  
+  **Parameters:**
+  - `url` (str): Resource URL
+  - `ranges` (list[tuple[int, int]]): List of (start, length) tuples
+  
+  **Returns:** `list[bytes]`
+</ParamField>
+
+## ObstoreBackend
+
+```python
+from rasteret.cloud import ObstoreBackend
+import obstore as obs
+
+store = obs.store.HTTPStore.from_url("https://example.com/data/")
+backend = ObstoreBackend(
+    store=store,
+    url_prefix="",
+    client_options=None
+)
+```
+
+StorageBackend backed by the `obstore` library. Wraps `obstore.get_range_async` / `obstore.get_ranges_async`.
+
+### Parameters
+
+<ParamField path="store" type="object" required>
+  Any obstore store (`S3Store`, `HTTPStore`, etc.).
+</ParamField>
+
+<ParamField path="url_prefix" type="str" default="">
+  URL prefix to strip before passing paths to obstore. obstore expects paths relative to the store root, but rasteret works with full URLs. For example, if COG URLs look like `https://sentinel-cogs.s3.us-west-2.amazonaws.com/sentinel-s2-l2a-cogs/...` and the store is `HTTPStore.from_url("https://sentinel-cogs.s3.us-west-2.amazonaws.com/")`, set `url_prefix="https://sentinel-cogs.s3.us-west-2.amazonaws.com/"`.
+</ParamField>
+
+<ParamField path="client_options" type="dict">
+  `ClientConfig` options forwarded to `HTTPStore.from_url` when constructing the store. Ignored if a pre-built `store` is provided.
+</ParamField>
+
+## Examples
+
+### Planetary Computer
+
+```python
+import rasteret
+from obstore.auth.planetary_computer import PlanetaryComputerCredentialProvider
+
+# Create backend with PC credentials
+pc_asset_url = "https://naipeuwest.blob.core.windows.net/naip/v002/"
+backend = rasteret.create_backend(
+    credential_provider=PlanetaryComputerCredentialProvider(pc_asset_url)
+)
+
+# Use with data access
+ds = collection.get_xarray(
+    geometries=bbox,
+    bands=["B04"],
+    backend=backend
+)
+```
+
+### NASA Earthdata
+
+```python
+from obstore.auth.earthdata import NasaEarthdataCredentialProvider
+
+# Create backend for NASA LP DAAC
+backend = rasteret.create_backend(
+    credential_provider=NasaEarthdataCredentialProvider(
+        credentials_url="https://data.lpdaac.earthdatacloud.nasa.gov/s3credentials"
+    ),
+    region="us-west-2"
+)
+
+collection = rasteret.build(
+    "lpdaac/hlsl30",
+    name="my_area",
+    bbox=bbox,
+    date_range=date_range,
+    backend=backend
+)
+```
+
+### Custom S3 Region
+
+```python
+# Access data in a specific region
+backend = rasteret.create_backend(
+    region="eu-west-1"
+)
+
+data = collection.get_numpy(
+    geometries=bbox,
+    bands=["B04"],
+    backend=backend
+)
+```
+
+### With CloudConfig
+
+```python
+from rasteret import CloudConfig
+
+config = CloudConfig(
+    provider="aws",
+    requester_pays=True,
+    region="us-west-2",
+    url_patterns={
+        "https://landsatlook.usgs.gov/data/": "s3://usgs-landsat/"
+    }
+)
+
+backend = rasteret.create_backend(
+    cloud_config=config
+)
+
+collection = rasteret.build(
+    "landsat-c2-l2",
+    name="landsat_test",
+    bbox=bbox,
+    date_range=date_range,
+    backend=backend
+)
+```
+
+### Custom ObstoreBackend
+
+```python
+import obstore as obs
+from rasteret.cloud import ObstoreBackend
+
+# Create custom S3 store
+store = obs.store.S3Store(
+    bucket="my-bucket",
+    config={
+        "region": "us-east-1",
+        "aws_access_key_id": "...",
+        "aws_secret_access_key": "..."
+    }
+)
+
+backend = ObstoreBackend(
+    store=store,
+    url_prefix="s3://my-bucket/"
+)
+
+data = collection.get_xarray(
+    geometries=bbox,
+    bands=["B04"],
+    backend=backend
+)
+```
+
+### Custom Backend Implementation
+
+```python
+import aiohttp
+from typing import Protocol
+
+class MyCustomBackend:
+    """Custom backend using aiohttp."""
+    
+    def __init__(self, session: aiohttp.ClientSession):
+        self.session = session
+    
+    async def get_range(self, url: str, start: int, length: int) -> bytes:
+        headers = {"Range": f"bytes={start}-{start + length - 1}"}
+        async with self.session.get(url, headers=headers) as resp:
+            return await resp.read()
+    
+    async def get_ranges(
+        self, url: str, ranges: list[tuple[int, int]]
+    ) -> list[bytes]:
+        # Fetch ranges concurrently
+        import asyncio
+        tasks = [
+            self.get_range(url, start, length)
+            for start, length in ranges
+        ]
+        return await asyncio.gather(*tasks)
+
+# Use custom backend
+session = aiohttp.ClientSession()
+backend = MyCustomBackend(session)
+
+data = collection.get_numpy(
+    geometries=bbox,
+    bands=["B04"],
+    backend=backend
+)
+```
+
+## Notes
+
+- Backends enable authenticated access to cloud storage
+- `create_backend()` returns an auto-configured obstore backend
+- Implement `StorageBackend` protocol for custom I/O layers
+- Credential providers must be from the `obstore.auth` package
+- Most built-in datasets work without explicit backends
+- Requester-pays datasets require valid cloud credentials
