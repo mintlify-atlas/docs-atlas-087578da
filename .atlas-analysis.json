@@ -1,0 +1,148 @@
+{
+  "projectType": "sdk-library",
+  "projectName": "Rasteret",
+  "projectDescription": "Index-first, fast GeoTIFF access layer for ML and analysis with Parquet-cached metadata.",
+  "theme": "aspen",
+  "primaryColor": "#009DD1",
+  "lightColor": null,
+  "darkColor": null,
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "installation",
+              "quickstart"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "concepts/index-first-retrieval",
+              "concepts/collections",
+              "concepts/dataset-catalog"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/building-collections",
+              "guides/filtering-queries",
+              "guides/ml-training",
+              "guides/data-analysis",
+              "guides/custom-datasets",
+              "guides/cloud-authentication"
+            ]
+          },
+          {
+            "group": "Integrations",
+            "pages": [
+              "integrations/torchgeo",
+              "integrations/xarray",
+              "integrations/stac"
+            ]
+          },
+          {
+            "group": "Advanced",
+            "pages": [
+              "advanced/multi-dataset-training",
+              "advanced/custom-cloud-providers",
+              "advanced/enriched-parquet-workflows",
+              "advanced/contributing-datasets"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Core API",
+            "pages": [
+              "api/build",
+              "api/load",
+              "api/collection",
+              "api/dataset-registry"
+            ]
+          },
+          {
+            "group": "Building Collections",
+            "pages": [
+              "api/build-from-stac",
+              "api/build-from-table",
+              "api/as-collection"
+            ]
+          },
+          {
+            "group": "Data Access",
+            "pages": [
+              "api/get-numpy",
+              "api/get-xarray",
+              "api/to-torchgeo"
+            ]
+          },
+          {
+            "group": "Configuration",
+            "pages": [
+              "api/cloud-config",
+              "api/backends",
+              "api/band-registry"
+            ]
+          },
+          {
+            "group": "CLI",
+            "pages": [
+              "api/cli"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Examples",
+        "groups": [
+          {
+            "group": "Examples",
+            "pages": [
+              "examples/sentinel-2-ml",
+              "examples/landsat-timeseries",
+              "examples/multi-source-training",
+              "examples/custom-parquet-ingestion"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Index-first geospatial retrieval with Parquet-cached COG metadata",
+    "20x faster cold-start performance vs traditional GDAL/rasterio approaches",
+    "Built-in catalog of 12+ datasets (Sentinel-2, Landsat, NAIP, etc.)",
+    "Zero data downloads - work with terabytes while storing only megabytes",
+    "TorchGeo integration for ML training pipelines",
+    "Multi-cloud support (S3, Azure Blob, GCS)",
+    "CLI for dataset management and collection building"
+  ],
+  "publicApiSurface": [
+    "rasteret.build() - Build collection from registered dataset",
+    "rasteret.build_from_stac() - Build from STAC API",
+    "rasteret.build_from_table() - Build from Parquet/GeoParquet",
+    "rasteret.load() - Load persisted collection",
+    "rasteret.as_collection() - Wrap Arrow table as collection",
+    "rasteret.register() - Register custom dataset",
+    "rasteret.register_local() - Register local collection",
+    "rasteret.create_backend() - Create authenticated I/O backend",
+    "Collection.subset() - Filter collection by metadata",
+    "Collection.get_numpy() - Get data as NumPy arrays",
+    "Collection.get_xarray() - Get data as xarray Dataset",
+    "Collection.to_torchgeo_dataset() - Convert to TorchGeo GeoDataset",
+    "Collection.export() - Export collection to Parquet",
+    "DatasetRegistry.list() - List available datasets",
+    "DatasetRegistry.get() - Get dataset descriptor",
+    "CLI: rasteret datasets list/info/search",
+    "CLI: rasteret collections list/info/build/delete"
+  ]
+}
