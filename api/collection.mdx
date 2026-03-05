@@ -191,6 +191,82 @@ def to_torchgeo_dataset(
 
 Convert to a TorchGeo-compatible GeoDataset for training.
 
+### where()
+
+```python
+def where(self, expr: ds.Expression) -> Collection
+```
+
+Return a filtered view using a raw PyArrow dataset expression. For advanced filtering beyond what `subset()` provides.
+
+<ParamField path="expr" type="pyarrow.dataset.Expression" required>
+  PyArrow expression for filtering (e.g., `ds.field("cloud_cover") < 10`).
+</ParamField>
+
+**Example:**
+```python
+import pyarrow.dataset as ds
+
+# Complex filter with multiple conditions
+filtered = collection.where(
+    (ds.field("cloud_cover") < 5) & 
+    (ds.field("platform") == "sentinel-2a")
+)
+```
+
+### select_split()
+
+```python
+def select_split(
+    self,
+    split: str | Sequence[str],
+    *,
+    split_column: str = "split",
+) -> Collection
+```
+
+Return a split-filtered view of this Collection. Convenience wrapper around `subset(split=...)`.
+
+<ParamField path="split" type="str | Sequence[str]" required>
+  Split value(s) to filter (e.g., `"train"`, `["train", "val"]`).
+</ParamField>
+
+<ParamField path="split_column" type="str" default="split">
+  Column name holding split labels.
+</ParamField>
+
+**Example:**
+```python
+train = collection.select_split("train")
+val = collection.select_split("val")
+test = collection.select_split("test")
+```
+
+### list_collections()
+
+```python
+@classmethod
+def list_collections(
+    cls,
+    workspace_dir: Path | None = None,
+) -> list[dict[str, Any]]
+```
+
+List cached collections with summary metadata.
+
+<ParamField path="workspace_dir" type="Path">
+  Directory to scan for cached collections. Defaults to `~/rasteret_workspace`.
+</ParamField>
+
+**Returns:** List of dictionaries with collection metadata (name, path, scene count, date range).
+
+**Example:**
+```python
+collections = Collection.list_collections()
+for c in collections:
+    print(f"{c['name']}: {c['scene_count']} scenes")
+```
+
 ### export()
 
 ```python
@@ -204,6 +280,47 @@ def export(
 ```
 
 Persist the collection to disk.
+
+<ParamField path="path" type="str | Path" required>
+  Output path for the exported collection.
+</ParamField>
+
+<ParamField path="format" type="str" default="parquet">
+  Output format (currently only `"parquet"` is supported).
+</ParamField>
+
+<ParamField path="partitioning" type="Any">
+  Optional partitioning scheme for the output dataset.
+</ParamField>
+
+## Properties
+
+### bands
+
+```python
+@property
+def bands(self) -> list[str]
+```
+
+List of band codes available in this collection. Extracted from `*_metadata` columns in the schema.
+
+### bounds
+
+```python
+@property
+def bounds(self) -> tuple[float, float, float, float] | None
+```
+
+Spatial bounds of the collection as `(minx, miny, maxx, maxy)` in CRS84 (EPSG:4326).
+
+### epsg
+
+```python
+@property
+def epsg(self) -> list[int]
+```
+
+List of unique EPSG codes present in the collection's scenes.
 
 ## Usage Example
 
